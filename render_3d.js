@@ -3,6 +3,7 @@
 const fs=require('fs'),path=require('path'),THREE=require('three');
 const {PNG}=require('pngjs');
 const J=new Map(),M=new Map(),T=new Map();
+const BIOME_TINT={grass_block_top:[89,167,51],oak_leaves:[60,192,41],spruce_leaves:[42,75,50],birch_leaves:[108,169,72],jungle_leaves:[51,145,30],acacia_leaves:[74,145,49],dark_oak_leaves:[56,130,38],azalea_leaves:[82,145,65],mangrove_leaves:[68,161,62],cherry_leaves:[231,178,178]};
 const V={east:[[1,0,0],[1,0,1],[1,1,1],[1,1,0]],west:[[0,0,1],[0,0,0],[0,1,0],[0,1,1]],up:[[0,1,0],[1,1,0],[1,1,1],[0,1,1]],down:[[0,0,1],[1,0,1],[1,0,0],[0,0,0]],south:[[1,0,1],[0,0,1],[0,1,1],[1,1,1]],north:[[0,0,0],[1,0,0],[1,1,0],[0,1,0]]};
 const UV=[[0,16],[16,16],[16,0],[0,0]];
 function json(f){if(!J.has(f))J.set(f,JSON.parse(fs.readFileSync(f)));return J.get(f)}
@@ -19,7 +20,8 @@ function multipart(v){return one(v).map(a=>({...a,y:a.y?(360-a.y)%360:0}))}
 function applications(assets,b){const f=path.join(assets,'blockstates',strip(b.id)+'.json');if(!fs.existsSync(f))return[];const s=json(f),out=[];
  if(s.variants){let fallback;for(const[k,v]of Object.entries(s.variants)){fallback??=v;const q=Object.fromEntries(k.split(',').filter(Boolean).map(x=>x.split('=')));if(Object.entries(q).every(([a,z])=>String(b.properties[a])===z)){out.push(...one(v));fallback=null;break}}if(!out.length&&fallback)out.push(...one(fallback))}
  for(const p of s.multipart||[])if(match(p.when,b.properties))out.push(...multipart(p.apply));return out}
-function texture(assets,n){n=strip(n);if(T.has(n))return T.get(n);const f=path.join(assets,'textures/block',n+'.png');if(!fs.existsSync(f))return null;const p=PNG.sync.read(fs.readFileSync(f)),o={width:p.width,height:Math.min(p.width,p.height),data:p.data};T.set(n,o);return o}
+function biomeTint(textureName,data){const color=BIOME_TINT[textureName];if(!color)return data;const out=Buffer.from(data);for(let i=0;i<out.length;i+=4){out[i]=Math.round(out[i]*color[0]/255);out[i+1]=Math.round(out[i+1]*color[1]/255);out[i+2]=Math.round(out[i+2]*color[2]/255)}return out}
+function texture(assets,n){n=strip(n);if(T.has(n))return T.get(n);const f=path.join(assets,'textures/block',n+'.png');if(!fs.existsSync(f))return null;const p=PNG.sync.read(fs.readFileSync(f)),o={width:p.width,height:Math.min(p.width,p.height),data:biomeTint(n,p.data)};T.set(n,o);return o}
 function waterTint(tx){if(tx.water)return tx.water;const data=Buffer.from(tx.data);for(let i=0;i<data.length;i+=4){const light=data[i]/255;data[i]=Math.round(64*light);data[i+1]=Math.round(118*light);data[i+2]=Math.round(228*light)}return tx.water={width:tx.width,height:tx.height,data}}
 function uvs(face){const u=face.uv||[0,0,16,16];let q=[[u[0],u[3]],[u[2],u[3]],[u[2],u[1]],[u[0],u[1]]];for(let i=0;i<(+face.rotation||0)/90;i++)q=[q[1],q[2],q[3],q[0]];return q}
 function matrix(e,a){const m=new THREE.Matrix4();if(e.rotation){const o=new THREE.Vector3(...(e.rotation.origin||[8,8,8])).multiplyScalar(1/16),axis=new THREE.Vector3(e.rotation.axis==='x'?1:0,e.rotation.axis==='y'?1:0,e.rotation.axis==='z'?1:0);m.premultiply(new THREE.Matrix4().makeTranslation(...o.clone().multiplyScalar(-1))).premultiply(new THREE.Matrix4().makeRotationAxis(axis,THREE.MathUtils.degToRad(e.rotation.angle||0))).premultiply(new THREE.Matrix4().makeTranslation(...o))}
