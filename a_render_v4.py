@@ -551,6 +551,12 @@ def _draw_checker_background(width: int, height: int, cells, px: int) -> Image.I
     return bg
 
 
+def _draw_wool_background(width_px: int, height_px: int) -> Image.Image:
+    """Stretch one light-gray wool texture across the full canvas."""
+    wool = Image.open(TEXTURE_DIR / "light_gray_wool.png").convert("RGB")
+    return wool.resize((width_px, height_px), Image.NEAREST)
+
+
 def _draw_block_edges(canvas: Image.Image, cells, px: int) -> Image.Image:
     """画方块阴影边框 — 只画在空气与方块的交界处, 不覆盖方块贴图"""
     from PIL import ImageDraw
@@ -612,6 +618,23 @@ def _draw_piston_extension(canvas: Image.Image, reg, face: str, px: int) -> None
                 canvas.alpha_composite(cell, (cx * px, cy * px))
 
 
+def _xray_layers(ray, max_layers: int):
+    """Keep only the nearest water surface so submerged blocks stay visible."""
+    layers = []
+    water_seen = False
+    for depth, block in ray:
+        if not block or v3.is_air(block.id):
+            continue
+        is_water = block.id in {"minecraft:water", "minecraft:bubble_column"}
+        if is_water and water_seen:
+            continue
+        water_seen |= is_water
+        layers.append((depth, block))
+        if len(layers) == max_layers:
+            break
+    return layers
+
+
 def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
     """Render a projection back-to-front so translucent deeper layers remain visible."""
     rx = list(range(reg.minx(), reg.maxx() + 1))
@@ -631,13 +654,9 @@ def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
                  for iz, z in enumerate(rz) for iy, y in enumerate(ry))
     # 把 cells 转成 list — 后面背景和边框函数都要复用
     cell_list = list(cells)
-    # 棋盘格背景 (白玻璃立刻能区分) — 只画在空气格子上
-    canvas = Image.new("RGBA", (width * px, height * px), BG_LIGHT)
-    bg_checker = _draw_checker_background(width, height, cell_list, px).convert("RGBA")
-    canvas.alpha_composite(bg_checker)
+    canvas = _draw_wool_background(width * px, height * px).convert("RGBA")
     projected_layers = [
-        (cx, cy, [(depth, block) for depth, block in ray
-                  if block and not v3.is_air(block.id)][:max_layers])
+        (cx, cy, _xray_layers(ray, max_layers))
         for cx, cy, ray in cell_list
     ]
     _draw_piston_extension(canvas, reg, face, px)
@@ -649,6 +668,8 @@ def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
                 continue
             block = layers[index][1]
             cell = block_cell(block, face, px)
+            if block.id in {"minecraft:water", "minecraft:bubble_column"}:
+                cell.putalpha(cell.getchannel("A").point(lambda alpha: round(alpha * .30)))
             if index > 0:
                 overlay = Image.new("RGBA", cell.size, (0, 0, 0, round(255 * 0.10)))
                 for _ in range(index):
@@ -683,7 +704,7 @@ def _projection_cells(reg, axes: str):
 def _finish_3d_projection(raw: Image.Image, reg, axes: str, px: int) -> Image.Image:
     """Put a transparent Three.js view onto V4's approved background treatment."""
     width, height, cells = _projection_cells(reg, axes)
-    canvas = _draw_checker_background(width, height, cells, px).convert("RGBA")
+    canvas = _draw_wool_background(width * px, height * px).convert("RGBA")
     occupied = [(cx, cy) for cx, cy, ray in cells if not _is_air_cell(ray)]
     if occupied:
         _composite_layer_shadow(canvas, occupied, px)
