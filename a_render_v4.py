@@ -551,10 +551,19 @@ def _draw_checker_background(width: int, height: int, cells, px: int) -> Image.I
     return bg
 
 
-def _draw_wool_background(width_px: int, height_px: int) -> Image.Image:
-    """Stretch one light-gray wool texture across the full canvas."""
+def _draw_wool_mosaic_background(width_px: int, height_px: int,
+                                 tile_px: int = 16) -> Image.Image:
+    """Tile light-gray wool without stretching it across the canvas."""
     wool = Image.open(TEXTURE_DIR / "light_gray_wool.png").convert("RGB")
-    return wool.resize((width_px, height_px), Image.NEAREST)
+    if wool.size != (tile_px, tile_px):
+        wool = wool.resize((tile_px, tile_px), Image.NEAREST)
+    cols = (width_px + tile_px - 1) // tile_px
+    rows = (height_px + tile_px - 1) // tile_px
+    canvas = Image.new("RGB", (cols * tile_px, rows * tile_px))
+    for row in range(rows):
+        for col in range(cols):
+            canvas.paste(wool, (col * tile_px, row * tile_px))
+    return canvas.crop((0, 0, width_px, height_px))
 
 
 def _draw_block_edges(canvas: Image.Image, cells, px: int) -> Image.Image:
@@ -623,7 +632,7 @@ def _xray_layers(ray, max_layers: int):
     layers = []
     water_seen = False
     for depth, block in ray:
-        if not block or v3.is_air(block.id):
+        if block is None or v3.is_air(block.id):
             continue
         is_water = block.id in {"minecraft:water", "minecraft:bubble_column"}
         if is_water and water_seen:
@@ -654,7 +663,7 @@ def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
                  for iz, z in enumerate(rz) for iy, y in enumerate(ry))
     # 把 cells 转成 list — 后面背景和边框函数都要复用
     cell_list = list(cells)
-    canvas = _draw_wool_background(width * px, height * px).convert("RGBA")
+    canvas = _draw_wool_mosaic_background(width * px, height * px).convert("RGBA")
     projected_layers = [
         (cx, cy, _xray_layers(ray, max_layers))
         for cx, cy, ray in cell_list
@@ -704,7 +713,7 @@ def _projection_cells(reg, axes: str):
 def _finish_3d_projection(raw: Image.Image, reg, axes: str, px: int) -> Image.Image:
     """Put a transparent Three.js view onto V4's approved background treatment."""
     width, height, cells = _projection_cells(reg, axes)
-    canvas = _draw_wool_background(width * px, height * px).convert("RGBA")
+    canvas = _draw_wool_mosaic_background(width * px, height * px).convert("RGBA")
     occupied = [(cx, cy) for cx, cy, ray in cells if not _is_air_cell(ray)]
     if occupied:
         _composite_layer_shadow(canvas, occupied, px)
@@ -712,14 +721,15 @@ def _finish_3d_projection(raw: Image.Image, reg, axes: str, px: int) -> Image.Im
     return _draw_block_edges(canvas, cells, px).convert("RGB")
 
 
-def render_three_views_3d(reg, px: int, output_dir=Path("/tmp"), prefix="v14"):
+def render_three_views_3d(reg, px: int, output_dir=Path("/tmp"), prefix="v14",
+                          include_iso: bool = False):
     """Serialize litemapy's block palette and invoke the Three.js renderer."""
     blocks = []
     for x in range(reg.minx(), reg.maxx() + 1):
         for y in range(reg.miny(), reg.maxy() + 1):
             for z in range(reg.minz(), reg.maxz() + 1):
                 block = reg[x, y, z]
-                if not block or v3.is_air(block.id):
+                if block is None or v3.is_air(block.id):
                     continue
                 blocks.append({
                     "id": block.id, "properties": _props(block),
@@ -733,6 +743,8 @@ def render_three_views_3d(reg, px: int, output_dir=Path("/tmp"), prefix="v14"):
                  "z": reg.maxz() - reg.minz() + 1},
         "px": px, "blocks": blocks,
         "outputDir": str(output_dir), "prefix": prefix,
+        "views": ["top", "front", "side", "iso"] if include_iso else
+                 ["top", "front", "side"],
     }
     with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8") as handle:
         json.dump(manifest, handle)
@@ -853,6 +865,8 @@ def main():
     p.add_argument("--layers", type=int, default=5, help="X-ray layers when mode=xray (default 5)")
     p.add_argument("--mode", choices=["top", "xray"], default="top",
                    help="top: only y=max_y for every view; xray: top N layers with 10%% fade (default top)")
+    p.add_argument("--iso", action="store_true",
+                   help="also render an isometric orthographic view to /tmp/v16_iso.png")
     args = p.parse_args()
 
     path = Path(args.input)
@@ -863,7 +877,8 @@ def main():
     reg = next(iter(schematic.regions.values()))
     print(f"=== {path.name}: {schematic.width}x{schematic.height}x{schematic.length} mode={args.mode} layers={max_layers} ===")
     if args.mode == "top":
-        xz, xy, yz = render_three_views_3d(reg, px)
+        xz, xy, yz = render_three_views_3d(
+            reg, px, prefix="v16" if args.iso else "v14", include_iso=args.iso)
     else:
         # Preserve V13's black-overlay X-ray semantics; V14 handles true surfaces.
         xz = render_projection(reg, "xz", px, max_layers)
@@ -874,7 +889,7 @@ def main():
         for y in range(reg.miny(), reg.maxy() + 1):
             for z in range(reg.minz(), reg.maxz() + 1):
                 block = reg[x, y, z]
-                if block and not v3.is_air(block.id):
+                if block is not None and not v3.is_air(block.id):
                     counts[block.id] += 1
     mode_label = f"Y={reg.maxy()} 顶层" if args.mode == "top" else f"X 射线 {max_layers} 层 (顶层向内)"
     result = make_layout_v4(
