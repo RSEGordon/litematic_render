@@ -170,10 +170,22 @@ def convert_one(name):
     if 'minecart' in name:
         texture_name = 'minecart/minecart'
     else:
+        # Special-case the few vanilla entities whose MC texture path
+        # differs from the entity id. Detect by on-disk existence rather
+        # than hard-coding each variant, since the 26.x asset pack
+        # already exposes the canonical Mojang layout.
         candidates = [name, f'{name}/{name}']
         # Common vanilla families use a subdirectory for their base skin.
         family = name.removeprefix('cave_').removeprefix('zombie_')
         candidates += [f'{family}/{name}', f'{family}/{family}']
+        # Joined-word fallback: armor_stand -> armorstand/ subdir.
+        joined = name.replace('_', '')
+        candidates += [joined, f'{joined}/{joined}', f'{joined}/{name}']
+        # Boat/oak_boat lives under textures/entity/boat/oak.png because
+        # the on-disk file is split by wood type, not by entity id.
+        if name.endswith('_boat'):
+            wood = name.removesuffix('_boat')
+            candidates += [f'boat/{wood}', f'{wood}/{name}']
         texture_name = next((candidate for candidate in candidates
                              if (TEXTURE_DIR / f'{candidate}.png').exists()), name)
     textures = {'0': texture_name}
