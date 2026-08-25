@@ -13,7 +13,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import litemapy
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 import a_render_v3 as v3
 
@@ -366,6 +366,23 @@ def _apply_alpha(image: Image.Image, opacity: float) -> Image.Image:
     return image
 
 
+def _composite_layer_shadow(canvas: Image.Image, occupied_cells, px: int) -> None:
+    """Add a soft shadow just outside one projected layer's combined contour."""
+    mask = Image.new("L", canvas.size, 0)
+    draw = ImageDraw.Draw(mask)
+    for cx, cy in occupied_cells:
+        x0, y0 = cx * px, cy * px
+        draw.rectangle((x0, y0, x0 + px - 1, y0 + px - 1), fill=255)
+
+    blurred = mask.filter(ImageFilter.GaussianBlur(radius=2))
+    outer_ring = ImageChops.subtract(blurred, mask).point(
+        lambda value: round(value * 80 / 255)
+    )
+    shadow = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    shadow.putalpha(outer_ring)
+    canvas.alpha_composite(shadow)
+
+
 # 背景纹理常量 (8-25 老板硬偏好: 浅灰棋盘格 + 1px 方块阴影边框)
 # 老板原话 8-25 补充: "网格就不要渲染在方块上面了, 灰色边框和棋盘格只是放在背景上"
 BG_LIGHT = (240, 240, 240)  # 棋盘浅格
@@ -438,14 +455,24 @@ def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
     canvas = Image.new("RGBA", (width * px, height * px), BG_LIGHT)
     bg_checker = _draw_checker_background(width, height, cell_list, px).convert("RGBA")
     canvas.alpha_composite(bg_checker)
-    for cx, cy, ray in cell_list:
-        layers = [(depth, block) for depth, block in ray if block and not v3.is_air(block.id)][:max_layers]
-        # Paste deepest first. Front is opaque; each deeper layer fades by 10% (90% opaque).
-        for index in reversed(range(len(layers))):
+    projected_layers = [
+        (cx, cy, [(depth, block) for depth, block in ray
+                  if block and not v3.is_air(block.id)][:max_layers])
+        for cx, cy, ray in cell_list
+    ]
+    # Paste complete depth layers deepest first so each gets one combined outer shadow.
+    for index in reversed(range(max_layers)):
+        occupied_cells = []
+        for cx, cy, layers in projected_layers:
+            if index >= len(layers):
+                continue
             block = layers[index][1]
             cell = block_cell(block, face, px)
             cell = _apply_alpha(cell, 1.0 if index == 0 else 0.9 ** index)
             canvas.alpha_composite(cell, (cx * px, cy * px))
+            occupied_cells.append((cx, cy))
+        if max_layers > 1 and occupied_cells:
+            _composite_layer_shadow(canvas, occupied_cells, px)
     # 加 1px 方块阴影边框 (老板原话"网格就不要渲染在方块上面了" — 只画在方块与空气交界处)
     canvas = _draw_block_edges(canvas, cell_list, px)
     return canvas.convert("RGB")
