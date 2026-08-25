@@ -24,6 +24,60 @@ DST_DIR = Path('/home/rsegordon/.hermes/scripts/litematic_render/client_assets/a
 # uniformly fitted to the renderer's 0..16 model space after all bones are read.
 TEXTURE_DIR = DST_DIR.parents[1] / 'textures' / 'entity'
 
+# Vanilla 26.2 EntityTypes.Builder.sized(width, height) values.  Entity hitboxes
+# are square on the horizontal plane, hence width applies to both X and Z.
+ENTITY_DIMENSIONS = {
+    'armor_stand': (0.5, 1.975),
+    'minecart': (0.98, 0.7),
+    'chest_minecart': (0.98, 0.7),
+    'command_block_minecart': (0.98, 0.7),
+    'furnace_minecart': (0.98, 0.7),
+    'hopper_minecart': (0.98, 0.7),
+    'spawner_minecart': (0.98, 0.7),
+    'tnt_minecart': (0.98, 0.7),
+    'oak_boat': (1.375, 0.5625),
+    'bamboo_raft': (1.375, 0.5625),
+}
+
+# Exact output of Minecraft 26.2 RaftModel.createRaftModel().  The version of
+# EntityModelJson available locally predates rafts, so retain Mojang's cubes,
+# part poses, texture offsets and 128x64 material here as a source layer.
+VANILLA_LAYER_OVERRIDES = {
+    'bamboo_raft': {
+        'material': {'xTexSize': 128, 'yTexSize': 64},
+        'mesh': {'root': {'children': {
+            'bottom': {
+                'cubes': [
+                    {'texCoord': {'u': 0, 'v': 0}, 'origin': [-14, -11, -4],
+                     'dimensions': [28, 20, 4]},
+                    {'texCoord': {'u': 0, 'v': 0}, 'origin': [-14, -9, -8],
+                     'dimensions': [28, 16, 4]},
+                ],
+                'partPose': {'xRot': 1.5708, 'y': -2.1, 'z': 1},
+            },
+            'left_paddle': {
+                'cubes': [
+                    {'texCoord': {'u': 0, 'v': 24}, 'origin': [-1, 0, -5],
+                     'dimensions': [2, 2, 18]},
+                    {'texCoord': {'u': 0, 'v': 24}, 'origin': [-1.001, -3, 8],
+                     'dimensions': [1, 6, 7]},
+                ],
+                'partPose': {'x': 3, 'y': -4, 'z': 9, 'zRot': 0.19634955},
+            },
+            'right_paddle': {
+                'cubes': [
+                    {'texCoord': {'u': 40, 'v': 24}, 'origin': [-1, 0, -5],
+                     'dimensions': [2, 2, 18]},
+                    {'texCoord': {'u': 40, 'v': 24}, 'origin': [0.001, -3, 8],
+                     'dimensions': [1, 6, 7]},
+                ],
+                'partPose': {'x': 3, 'y': -4, 'z': -9, 'yRot': 3.1415927,
+                             'zRot': 0.19634955},
+            },
+        }}},
+    },
+}
+
 
 def mat_mul(a, b):
     return [[sum(a[r][k] * b[k][c] for k in range(4)) for c in range(4)] for r in range(4)]
@@ -125,10 +179,13 @@ def walk_bones(bones, parent_matrix, elements, texture_size):
 
 def convert_one(name):
     src = SRC_DIR / f'{name}.json'
-    if not src.exists():
+    if name in VANILLA_LAYER_OVERRIDES:
+        data = VANILLA_LAYER_OVERRIDES[name]
+    elif src.exists():
+        with open(src) as f:
+            data = json.load(f)
+    else:
         return False
-    with open(src) as f:
-        data = json.load(f)
 
     elements = []
     material = data.get('material', {})
@@ -151,20 +208,31 @@ def convert_one(name):
     # stripped "allay/allay" = "allay/allay"  →  textures/entity/allay/allay.png ✓
     # minecart 类型 (hopper_minecart / chest_minecart / tnt_minecart 等)
     # 都用 minecart.png 在 textures/entity/minecart/ 子目录
-    # Uniformly fit the complete transformed model into one block. ModelPart Y
-    # grows downward, opposite to THREE.js, so reflect Y inside the normalized
-    # 0..16 model box. X/Z remain centered around 8.
+    # Scale each model axis to the vanilla 26.2 hitbox instead of fitting the
+    # largest model span into an arbitrary one-block cube. ModelPart Y grows
+    # downward, opposite to THREE.js, so reflect Y after grounding the minimum.
     points = [point for element in elements for face in element['vertices'].values() for point in face]
     mins = [min(p[i] for p in points) for i in range(3)]
     maxs = [max(p[i] for p in points) for i in range(3)]
     spans = [maxs[i] - mins[i] for i in range(3)]
-    scale = 16 / max(max(spans), 1e-9)
-    offsets = [8 - (mins[0] + maxs[0]) * scale / 2, -mins[1] * scale,
-               8 - (mins[2] + maxs[2]) * scale / 2]
+    dimensions = ENTITY_DIMENSIONS.get(name)
+    if dimensions:
+        width, height = dimensions
+        targets = [width * 16, height * 16, width * 16]
+        scales = [targets[i] / max(spans[i], 1e-9) for i in range(3)]
+    else:
+        # Preserve legacy behaviour for models whose 26.2 EntityType has not
+        # yet been transcribed into ENTITY_DIMENSIONS.
+        scale = 16 / max(max(spans), 1e-9)
+        scales = [scale, scale, scale]
+        targets = [spans[i] * scale for i in range(3)]
+    offsets = [8 - (mins[0] + maxs[0]) * scales[0] / 2,
+               -mins[1] * scales[1],
+               8 - (mins[2] + maxs[2]) * scales[2] / 2]
     for element in elements:
         for face, vertices in element['vertices'].items():
-            normalized = [[p[i] * scale + offsets[i] for i in range(3)] for p in vertices]
-            element['vertices'][face] = [[round(p[0], 5), round(16 - p[1], 5), round(p[2], 5)]
+            normalized = [[p[i] * scales[i] + offsets[i] for i in range(3)] for p in vertices]
+            element['vertices'][face] = [[round(p[0], 5), round(targets[1] - p[1], 5), round(p[2], 5)]
                                          for p in normalized]
 
     if 'minecart' in name:
@@ -185,6 +253,9 @@ def convert_one(name):
         # the on-disk file is split by wood type, not by entity id.
         if name.endswith('_boat'):
             wood = name.removesuffix('_boat')
+            candidates += [f'boat/{wood}', f'{wood}/{name}']
+        if name.endswith('_raft'):
+            wood = name.removesuffix('_raft')
             candidates += [f'boat/{wood}', f'{wood}/{name}']
         texture_name = next((candidate for candidate in candidates
                              if (TEXTURE_DIR / f'{candidate}.png').exists()), name)
