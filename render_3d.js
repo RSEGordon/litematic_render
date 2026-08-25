@@ -4,7 +4,12 @@ const fs=require('fs'),path=require('path'),THREE=require('three');
 const {PNG}=require('pngjs');
 const J=new Map(),M=new Map(),T=new Map();
 const BIOME_TINT={grass_block_top:[89,167,51],grass_block_side_overlay:[89,167,51],oak_leaves:[60,192,41],spruce_leaves:[42,75,50],birch_leaves:[108,169,72],jungle_leaves:[51,145,30],acacia_leaves:[74,145,49],dark_oak_leaves:[56,130,38],azalea_leaves:[82,145,65],mangrove_leaves:[68,161,62],cherry_leaves:[231,178,178]};
-const REDSTONE_COLORS={0:[60,60,60],1:[85,50,30],2:[110,35,15],3:[135,25,10],4:[160,20,5],5:[185,15,0],6:[210,30,0],7:[235,50,0],8:[255,70,0],9:[255,95,0],10:[255,120,0],11:[255,145,0],12:[255,170,0],13:[255,195,0],14:[255,220,0],15:[255,245,50]};
+// MC 26.2 vanilla redstone wire colors (RedStoneWireBlock.lambda$static$0)
+// power=0: dark red, power=15: bright red. Source: decompiled RedStoneWireBlock.class
+// Formula: r = power*0.6 + (0.4 if power>0 else 0.3)
+//          g = clamp(power*power*0.7 - 0.5, 0, 1)
+//          b = clamp(power*power*0.6 - 0.7, 0, 1)
+const REDSTONE_COLORS={0:[76,0,0],1:[112,0,0],2:[122,0,0],3:[133,0,0],4:[143,0,0],5:[153,0,0],6:[163,0,0],7:[173,0,0],8:[184,0,0],9:[194,0,0],10:[204,0,0],11:[214,0,0],12:[224,0,0],13:[235,7,0],14:[245,28,0],15:[255,51,0]};
 const V={east:[[1,0,0],[1,0,1],[1,1,1],[1,1,0]],west:[[0,0,1],[0,0,0],[0,1,0],[0,1,1]],up:[[0,1,0],[1,1,0],[1,1,1],[0,1,1]],down:[[0,0,1],[1,0,1],[1,0,0],[0,0,0]],south:[[1,0,1],[0,0,1],[0,1,1],[1,1,1]],north:[[0,0,0],[1,0,0],[1,1,0],[0,1,0]]};
 const FACE_NORMALS_BASE={east:[1,0,0],west:[-1,0,0],up:[0,1,0],down:[0,-1,0],south:[0,0,1],north:[0,0,-1]};
 const UV=[[0,16],[16,16],[16,0],[0,0]];
