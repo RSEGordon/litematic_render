@@ -319,39 +319,50 @@ def _apply_alpha(image: Image.Image, opacity: float) -> Image.Image:
 
 
 # 背景纹理常量 (8-25 老板硬偏好: 浅灰棋盘格 + 1px 方块阴影边框)
+# 老板原话 8-25 补充: "网格就不要渲染在方块上面了, 灰色边框和棋盘格只是放在背景上"
 BG_LIGHT = (240, 240, 240)  # 棋盘浅格
 BG_DARK = (220, 220, 220)   # 棋盘深格
 BLOCK_EDGE = (180, 180, 180)  # 1px 方块边界阴影
 
 
-def _draw_checker_background(width: int, height: int, px: int) -> Image.Image:
-    """16px 浅灰棋盘格背景 — 玻璃白贴图不再跟背景混"""
+def _is_air_cell(ray) -> bool:
+    """判断一个 (cx, cy) 位置是否所有层都是空气 — 用来判断是否画背景纹理"""
+    return all(block is None or v3.is_air(block.id) for _, block in ray)
+
+
+def _draw_checker_background(width: int, height: int, cells, px: int) -> Image.Image:
+    """16px 浅灰棋盘格背景 — 只画在空气格子上, 不覆盖方块贴图"""
     bg = Image.new("RGB", (width * px, height * px), BG_LIGHT)
     pixels = bg.load()
-    for cx in range(width):
-        for cy in range(height):
-            if (cx + cy) % 2 == 1:
-                # 整方块涂深色
-                x0, y0 = cx * px, cy * px
-                for dx in range(px):
-                    for dy in range(px):
-                        pixels[x0 + dx, y0 + dy] = BG_DARK
+    for (cx, cy, ray) in cells:
+        if not _is_air_cell(ray):
+            continue  # 跳过有方块的格子, 保持 BG_LIGHT
+        if (cx + cy) % 2 == 1:
+            x0, y0 = cx * px, cy * px
+            for dx in range(px):
+                for dy in range(px):
+                    pixels[x0 + dx, y0 + dy] = BG_DARK
     return bg
 
 
-def _draw_block_edges(canvas: Image.Image, width: int, height: int, px: int) -> Image.Image:
-    """给每个方块画 1px 灰色右边/下边阴影 — 看方块边缘"""
+def _draw_block_edges(canvas: Image.Image, cells, px: int) -> Image.Image:
+    """画方块阴影边框 — 只画在空气与方块的交界处, 不覆盖方块贴图"""
     from PIL import ImageDraw
     canvas = canvas.copy()
     draw = ImageDraw.Draw(canvas)
-    for cx in range(width):
-        for cy in range(height):
-            x0 = cx * px
-            y0 = cy * px
-            # 右边缘 + 下边缘画 1px 阴影
-            if x0 + px < canvas.width:
+
+    # 建 (cx, cy) -> 是否空气 索引
+    cell_map = {(cx, cy): _is_air_cell(ray) for (cx, cy, ray) in cells}
+
+    for (cx, cy, ray) in cells:
+        x0, y0 = cx * px, cy * px
+        # 右边界: 当前格有方块, 右边格是空气 → 画阴影
+        if x0 + px < canvas.width and not _is_air_cell(ray):
+            if cell_map.get((cx + 1, cy), True):
                 draw.line([(x0 + px - 1, y0), (x0 + px - 1, y0 + px - 1)], fill=BLOCK_EDGE)
-            if y0 + px < canvas.height:
+        # 下边界: 当前格有方块, 下边格是空气 → 画阴影
+        if y0 + px < canvas.height and not _is_air_cell(ray):
+            if cell_map.get((cx, cy + 1), True):
                 draw.line([(x0, y0 + px - 1), (x0 + px - 1, y0 + px - 1)], fill=BLOCK_EDGE)
     return canvas
 
@@ -373,11 +384,13 @@ def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
         width, height, face = len(rz), len(ry), "west"
         cells = ((iz, len(ry) - 1 - iy, [(x, reg[x, y, z]) for x in reversed(rx)])
                  for iz, z in enumerate(rz) for iy, y in enumerate(ry))
-    # 棋盘格背景（白玻璃立刻能区分）
+    # 把 cells 转成 list — 后面背景和边框函数都要复用
+    cell_list = list(cells)
+    # 棋盘格背景 (白玻璃立刻能区分) — 只画在空气格子上
     canvas = Image.new("RGBA", (width * px, height * px), BG_LIGHT)
-    bg_checker = _draw_checker_background(width, height, px).convert("RGBA")
+    bg_checker = _draw_checker_background(width, height, cell_list, px).convert("RGBA")
     canvas.alpha_composite(bg_checker)
-    for cx, cy, ray in cells:
+    for cx, cy, ray in cell_list:
         layers = [(depth, block) for depth, block in ray if block and not v3.is_air(block.id)][:max_layers]
         # Paste deepest first. Front is opaque; each deeper layer fades by 10% (90% opaque).
         for index in reversed(range(len(layers))):
@@ -385,8 +398,8 @@ def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
             cell = block_cell(block, face, px)
             cell = _apply_alpha(cell, 1.0 if index == 0 else 0.9 ** index)
             canvas.alpha_composite(cell, (cx * px, cy * px))
-    # 加 1px 方块阴影边框（老板原话"看到方块边缘")
-    canvas = _draw_block_edges(canvas, width, height, px)
+    # 加 1px 方块阴影边框 (老板原话"网格就不要渲染在方块上面了" — 只画在方块与空气交界处)
+    canvas = _draw_block_edges(canvas, cell_list, px)
     return canvas.convert("RGB")
 
 
