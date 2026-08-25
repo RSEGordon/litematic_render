@@ -27,24 +27,28 @@ SCALE = 0.67
 
 
 def convert_cube(cube, part_pos, textures, face_count):
-    """单个 cube → element {from, to, faces}"""
+    """单个 cube → element {from, to, faces}
+
+    origin 是 cube 最小角相对当前 bone 原点的偏移 (SizableShrimp 用 box 中心为 0,0,0)。
+    加上 part_pos (父 bone 的累积位移) → 相对模型中心的坐标。
+    模型中心在 (8, 8, 8) 渲染 1 块内, 加 8 偏移让 boxes 居中到 0-16 范围。
+    """
     ox, oy, oz = cube['origin']
     w, h, d = cube['dimensions']
     grow = cube.get('grow', 0)
 
     # grow 让边缘变细 (mc 内部用), 我们忽略 (改为实际尺寸)
-    # origin 是负的"中心"位置 (-w/2, ..., -h/2, ...)
 
     # 转 16 像素基准 + 父 part_pos 偏移
     # MC box 模型: from [0,0,0] to [16,16,16] = 1 块
     # 实体: 中心 (8, 8, 8), 实体大小约 1 块
     # 直接用 0-24 范围 (SizableShrimp 默认), 但渲染器按 (x-8)/16 居中
-    fx = (ox + part_pos[0]) * SCALE
-    fy = (oy + part_pos[1]) * SCALE
-    fz = (oz + part_pos[2]) * SCALE
-    tx = (ox + w + part_pos[0]) * SCALE
-    ty = (oy + h + part_pos[1]) * SCALE
-    tz = (oz + d + part_pos[2]) * SCALE
+    fx = (ox + part_pos[0]) * SCALE + 8
+    fy = (oy + part_pos[1]) * SCALE + 8
+    fz = (oz + part_pos[2]) * SCALE + 8
+    tx = (ox + w + part_pos[0]) * SCALE + 8
+    ty = (oy + h + part_pos[1]) * SCALE + 8
+    tz = (oz + d + part_pos[2]) * SCALE + 8
 
     # 如果某个维度是 0 (翅膀薄板), 给 1 像素厚度
     if tx - fx < 0.5:
