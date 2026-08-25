@@ -137,6 +137,53 @@ def _crop_uv(texture: Image.Image, face_def: dict) -> Image.Image:
     return image.rotate(-90 * rotations, expand=True) if rotations else image
 
 
+def _rotate_vector(vector, x_rotation=0, y_rotation=0):
+    """Rotate a direction vector with the same transform as model points."""
+    x, y, z = vector
+    for _ in range((x_rotation % 360) // 90):
+        y, z = -z, y
+    for _ in range((y_rotation % 360) // 90):
+        x, z = -z, x
+    return x, y, z
+
+
+def _orient_variant_uv(image: Image.Image, model_face: str, view_face: str,
+                       x_rotation: int, y_rotation: int) -> Image.Image:
+    """Rotate/flip face UVs together with the blockstate model transform."""
+    # These are the world-space directions represented by image-right and
+    # image-down in this renderer's three orthographic projections.
+    face_basis = {
+        "up": ((1, 0, 0), (0, 0, 1)),
+        "down": ((1, 0, 0), (0, 0, 1)),
+        "north": ((1, 0, 0), (0, -1, 0)),
+        "south": ((1, 0, 0), (0, -1, 0)),
+        "west": ((0, 0, 1), (0, -1, 0)),
+        "east": ((0, 0, 1), (0, -1, 0)),
+    }
+    source_right, source_down = face_basis[model_face]
+    target_right, target_down = face_basis[view_face]
+    source_right = _rotate_vector(source_right, x_rotation, y_rotation)
+    source_down = _rotate_vector(source_down, x_rotation, y_rotation)
+
+    def screen_vector(vector):
+        return (sum(a * b for a, b in zip(vector, target_right)),
+                sum(a * b for a, b in zip(vector, target_down)))
+
+    mapping = screen_vector(source_right), screen_vector(source_down)
+    transforms = {
+        ((1, 0), (0, 1)): None,
+        ((0, 1), (-1, 0)): Image.Transpose.ROTATE_270,
+        ((-1, 0), (0, -1)): Image.Transpose.ROTATE_180,
+        ((0, -1), (1, 0)): Image.Transpose.ROTATE_90,
+        ((-1, 0), (0, 1)): Image.Transpose.FLIP_LEFT_RIGHT,
+        ((1, 0), (0, -1)): Image.Transpose.FLIP_TOP_BOTTOM,
+        ((0, 1), (1, 0)): Image.Transpose.TRANSPOSE,
+        ((0, -1), (-1, 0)): Image.Transpose.TRANSVERSE,
+    }
+    transform = transforms[mapping]
+    return image.transpose(transform) if transform is not None else image
+
+
 def _project_box(corners, view_face: str):
     xs, ys, zs = zip(*corners)
     if view_face in ("up", "down"):
@@ -166,17 +213,18 @@ def render_model_face(block, view_face: str, px: int) -> Image.Image:
                 continue
             tex_name = _texture_name(face_def, model["textures"])
             if tex_name:
-                drawables.append((rect[4], rect[:4], tex_name, face_def))
+                drawables.append((rect[4], rect[:4], tex_name, model_face, face_def))
     if not drawables:
         return _fallback_cell(block, view_face, px)
     cell = Image.new("RGBA", (px, px))
     scale = px / 16
-    for _, (x0, y0, x1, y1), tex_name, face_def in sorted(drawables):
+    for _, (x0, y0, x1, y1), tex_name, model_face, face_def in sorted(drawables):
         left, top = round(x0 * scale), round(y0 * scale)
         right, bottom = round(x1 * scale), round(y1 * scale)
         # Zero-thickness planes still occupy one pixel in an orthographic view.
         right, bottom = max(right, left + 1), max(bottom, top + 1)
         texture = _crop_uv(v3.load_texture_rgba(tex_name), face_def)
+        texture = _orient_variant_uv(texture, model_face, view_face, xr, yr)
         texture = texture.resize((right - left, bottom - top), Image.Resampling.NEAREST)
         cell.alpha_composite(texture, (left, top))
     return cell
