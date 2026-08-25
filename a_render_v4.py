@@ -318,6 +318,44 @@ def _apply_alpha(image: Image.Image, opacity: float) -> Image.Image:
     return image
 
 
+# 背景纹理常量 (8-25 老板硬偏好: 浅灰棋盘格 + 1px 方块阴影边框)
+BG_LIGHT = (240, 240, 240)  # 棋盘浅格
+BG_DARK = (220, 220, 220)   # 棋盘深格
+BLOCK_EDGE = (180, 180, 180)  # 1px 方块边界阴影
+
+
+def _draw_checker_background(width: int, height: int, px: int) -> Image.Image:
+    """16px 浅灰棋盘格背景 — 玻璃白贴图不再跟背景混"""
+    bg = Image.new("RGB", (width * px, height * px), BG_LIGHT)
+    pixels = bg.load()
+    for cx in range(width):
+        for cy in range(height):
+            if (cx + cy) % 2 == 1:
+                # 整方块涂深色
+                x0, y0 = cx * px, cy * px
+                for dx in range(px):
+                    for dy in range(px):
+                        pixels[x0 + dx, y0 + dy] = BG_DARK
+    return bg
+
+
+def _draw_block_edges(canvas: Image.Image, width: int, height: int, px: int) -> Image.Image:
+    """给每个方块画 1px 灰色右边/下边阴影 — 看方块边缘"""
+    from PIL import ImageDraw
+    canvas = canvas.copy()
+    draw = ImageDraw.Draw(canvas)
+    for cx in range(width):
+        for cy in range(height):
+            x0 = cx * px
+            y0 = cy * px
+            # 右边缘 + 下边缘画 1px 阴影
+            if x0 + px < canvas.width:
+                draw.line([(x0 + px - 1, y0), (x0 + px - 1, y0 + px - 1)], fill=BLOCK_EDGE)
+            if y0 + px < canvas.height:
+                draw.line([(x0, y0 + px - 1), (x0 + px - 1, y0 + px - 1)], fill=BLOCK_EDGE)
+    return canvas
+
+
 def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
     """Render a projection back-to-front so translucent deeper layers remain visible."""
     rx = list(range(reg.minx(), reg.maxx() + 1))
@@ -335,7 +373,10 @@ def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
         width, height, face = len(rz), len(ry), "west"
         cells = ((iz, len(ry) - 1 - iy, [(x, reg[x, y, z]) for x in reversed(rx)])
                  for iz, z in enumerate(rz) for iy, y in enumerate(ry))
-    canvas = Image.new("RGBA", (width * px, height * px), "white")
+    # 棋盘格背景（白玻璃立刻能区分）
+    canvas = Image.new("RGBA", (width * px, height * px), BG_LIGHT)
+    bg_checker = _draw_checker_background(width, height, px).convert("RGBA")
+    canvas.alpha_composite(bg_checker)
     for cx, cy, ray in cells:
         layers = [(depth, block) for depth, block in ray if block and not v3.is_air(block.id)][:max_layers]
         # Paste deepest first. Front is opaque; each deeper layer fades by 10% (90% opaque).
@@ -344,6 +385,8 @@ def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
             cell = block_cell(block, face, px)
             cell = _apply_alpha(cell, 1.0 if index == 0 else 0.9 ** index)
             canvas.alpha_composite(cell, (cx * px, cy * px))
+    # 加 1px 方块阴影边框（老板原话"看到方块边缘")
+    canvas = _draw_block_edges(canvas, width, height, px)
     return canvas.convert("RGB")
 
 
