@@ -338,11 +338,11 @@ def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
     canvas = Image.new("RGBA", (width * px, height * px), "white")
     for cx, cy, ray in cells:
         layers = [(depth, block) for depth, block in ray if block and not v3.is_air(block.id)][:max_layers]
-        # Paste deepest first. Front is opaque; each deeper layer follows 0.4**i.
+        # Paste deepest first. Front is opaque; each deeper layer fades by 10% (90% opaque).
         for index in reversed(range(len(layers))):
             block = layers[index][1]
             cell = block_cell(block, face, px)
-            cell = _apply_alpha(cell, 1.0 if index == 0 else 0.4 ** index)
+            cell = _apply_alpha(cell, 1.0 if index == 0 else 0.9 ** index)
             canvas.alpha_composite(cell, (cx * px, cy * px))
     return canvas.convert("RGB")
 
