@@ -142,8 +142,9 @@ def convert_one(name):
     # stripped "allay/allay" = "allay/allay"  →  textures/entity/allay/allay.png ✓
     # minecart 类型 (hopper_minecart / chest_minecart / tnt_minecart 等)
     # 都用 minecart.png 在 textures/entity/minecart/ 子目录
-    # Uniformly fit the complete transformed model into one block. X/Z are
-    # centered around 8; Y starts at 0 so the entity position remains its feet.
+    # Uniformly fit the complete transformed model into one block. ModelPart Y
+    # grows downward, opposite to THREE.js, so reflect Y inside the normalized
+    # 0..16 model box. X/Z remain centered around 8.
     points = [point for element in elements for face in element['vertices'].values() for point in face]
     mins = [min(p[i] for p in points) for i in range(3)]
     maxs = [max(p[i] for p in points) for i in range(3)]
@@ -153,8 +154,9 @@ def convert_one(name):
                8 - (mins[2] + maxs[2]) * scale / 2]
     for element in elements:
         for face, vertices in element['vertices'].items():
-            element['vertices'][face] = [[round(p[i] * scale + offsets[i], 5) for i in range(3)]
-                                         for p in vertices]
+            normalized = [[p[i] * scale + offsets[i] for i in range(3)] for p in vertices]
+            element['vertices'][face] = [[round(p[0], 5), round(16 - p[1], 5), round(p[2], 5)]
+                                         for p in normalized]
 
     if 'minecart' in name:
         texture_name = 'minecart/minecart'
