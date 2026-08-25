@@ -7,7 +7,10 @@ shape in the front and side projections.
 """
 
 import json
+import math
+import subprocess
 import sys
+import tempfile
 from collections import Counter
 from functools import lru_cache
 from pathlib import Path
@@ -22,6 +25,7 @@ ASSETS = ROOT / "client_assets/assets/minecraft"
 MODEL_DIR = ASSETS / "models/block"
 BLOCKSTATE_DIR = ASSETS / "blockstates"
 TEXTURE_DIR = ASSETS / "textures/block"
+ITEM_TEXTURE_DIR = ASSETS / "textures/item"
 
 
 def _piston_extension_model(platform: str) -> dict:
@@ -182,6 +186,24 @@ def _rotate_vector(vector, x_rotation=0, y_rotation=0):
     return x, y, z
 
 
+def _rotate_element(value, rotation: dict | None, *, point: bool):
+    """Apply an element's own (possibly 22.5/45 degree) model rotation."""
+    if not rotation:
+        return value
+    origin = rotation.get("origin", [8, 8, 8]) if point else (0, 0, 0)
+    x, y, z = (coordinate - centre for coordinate, centre in zip(value, origin))
+    angle = math.radians(float(rotation.get("angle", 0)))
+    cosine, sine = math.cos(angle), math.sin(angle)
+    axis = rotation.get("axis")
+    if axis == "x":
+        y, z = y * cosine - z * sine, y * sine + z * cosine
+    elif axis == "y":
+        x, z = x * cosine + z * sine, -x * sine + z * cosine
+    elif axis == "z":
+        x, y = x * cosine - y * sine, x * sine + y * cosine
+    return tuple(coordinate + centre for coordinate, centre in zip((x, y, z), origin))
+
+
 def _orient_variant_uv(image: Image.Image, model_face: str, view_face: str,
                        x_rotation: int, y_rotation: int) -> Image.Image:
     """Rotate/flip face UVs together with the blockstate model transform."""
@@ -238,28 +260,43 @@ def render_model_face(block, view_face: str, px: int) -> Image.Image:
         return _fallback_cell(block, view_face, px)
     xr, yr = int(variant.get("x", 0)), int(variant.get("y", 0))
     drawables = []
+    view_normal = {
+        "west": (-1, 0, 0), "east": (1, 0, 0),
+        "down": (0, -1, 0), "up": (0, 1, 0),
+        "north": (0, 0, -1), "south": (0, 0, 1),
+    }[view_face]
     for element in model["elements"]:
         lo, hi = element.get("from", [0, 0, 0]), element.get("to", [16, 16, 16])
-        corners = [_rotate_point((x, y, z), xr, yr)
+        element_rotation = element.get("rotation")
+        corners = [_rotate_point(_rotate_element((x, y, z), element_rotation, point=True), xr, yr)
                    for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])]
         rect = _project_box(corners, view_face)
         for model_face, face_def in element.get("faces", {}).items():
-            if _rotate_normal(model_face, xr, yr) != view_face:
+            normal = {
+                "west": (-1, 0, 0), "east": (1, 0, 0),
+                "down": (0, -1, 0), "up": (0, 1, 0),
+                "north": (0, 0, -1), "south": (0, 0, 1),
+            }[model_face]
+            normal = _rotate_element(normal, element_rotation, point=False)
+            normal = _rotate_vector(normal, xr, yr)
+            if sum(a * b for a, b in zip(normal, view_normal)) <= 1e-6:
                 continue
             tex_name = _texture_name(face_def, model["textures"])
             if tex_name:
-                drawables.append((rect[4], rect[:4], tex_name, model_face, face_def))
+                drawables.append((rect[4], rect[:4], tex_name, model_face,
+                                  face_def, bool(element_rotation)))
     if not drawables:
         return _fallback_cell(block, view_face, px)
     cell = Image.new("RGBA", (px, px))
     scale = px / 16
-    for _, (x0, y0, x1, y1), tex_name, model_face, face_def in sorted(drawables):
+    for _, (x0, y0, x1, y1), tex_name, model_face, face_def, locally_rotated in sorted(drawables):
         left, top = round(x0 * scale), round(y0 * scale)
         right, bottom = round(x1 * scale), round(y1 * scale)
         # Zero-thickness planes still occupy one pixel in an orthographic view.
         right, bottom = max(right, left + 1), max(bottom, top + 1)
         texture = _crop_uv(v3.load_texture_rgba(tex_name), face_def)
-        texture = _orient_variant_uv(texture, model_face, view_face, xr, yr)
+        if not locally_rotated:
+            texture = _orient_variant_uv(texture, model_face, view_face, xr, yr)
         texture = texture.resize((right - left, bottom - top), Image.Resampling.NEAREST)
         cell.alpha_composite(texture, (left, top))
     return cell
@@ -368,24 +405,27 @@ FALLBACK_EXACT = {
     "ender_chest": "obsidian", "barrel": "barrel_side", "redstone_lamp": "redstone_lamp",
     "soul_sand": "soul_sand", "observer": "observer_side",
     "composter": "composter_side",
+    "bubble_column": "water_still", "chain": "iron_chain",
     "spruce_wall_sign": "spruce_planks", "player_head": "smooth_stone",
     "moving_piston": "piston_side",
 }
 
 
-def _fallback_texture(name: str, face: str) -> str:
+def _fallback_texture(name: str, face: str) -> str | None:
+    """Return the first real block texture alias, never a missing filename."""
+    candidates = []
     if name in FALLBACK_EXACT:
-        return FALLBACK_EXACT[name]
+        candidates.append(FALLBACK_EXACT[name])
     if "shulker_box" in name:
-        return name.replace("_shulker_box", "_shulker_box")
+        candidates.append(name.replace("_shulker_box", "_shulker_box"))
     if name.endswith("_stained_glass_pane"):
-        return name.removesuffix("_pane")
+        candidates.append(name.removesuffix("_pane"))
     if name == "glass_pane":
-        return "glass"
+        candidates.append("glass")
     if name.endswith("_coral_wall_fan"):
-        return name.replace("_wall_fan", "_fan")
+        candidates.append(name.replace("_wall_fan", "_fan"))
     if name.endswith("_wall_sign"):
-        return f"{name.removesuffix('_wall_sign')}_planks"
+        candidates.append(f"{name.removesuffix('_wall_sign')}_planks")
     suffixes = (
         "_wall", "_fence", "_stairs", "_door", "_sign", "_trapdoor", "_slab",
         "_pressure_plate", "_button", "_coral", "_leaves", "_log", "_wood",
@@ -394,18 +434,36 @@ def _fallback_texture(name: str, face: str) -> str:
     for suffix in suffixes:
         if name.endswith(suffix):
             base = name[:-len(suffix)]
-            candidates = [name, f"{base}_planks", f"{base}_log", base]
-            for candidate in candidates:
-                if (TEXTURE_DIR / f"{candidate}.png").exists():
-                    return candidate
-    return name
+            candidates.extend([name, f"{base}_planks", f"{base}_log", base])
+    candidates.append(name)
+    return next((candidate for candidate in candidates
+                 if (TEXTURE_DIR / f"{candidate}.png").exists()), None)
+
+
+def _resource_texture_paths(name: str):
+    return (
+        ITEM_TEXTURE_DIR / f"{name}.png",
+        ITEM_TEXTURE_DIR / f"{name}_inventory.png",
+        TEXTURE_DIR / f"{name}.png",
+        TEXTURE_DIR / f"{name}_top.png",
+    )
+
+
+def _purple_checker(size: int) -> Image.Image:
+    image = Image.new("RGB", (size, size), (122, 31, 162))
+    step = max(1, size // 4)
+    draw = ImageDraw.Draw(image)
+    for coordinate in range(0, size, step):
+        draw.line((coordinate, 0, coordinate, size - 1), fill=(0, 0, 0))
+        draw.line((0, coordinate, size - 1, coordinate), fill=(0, 0, 0))
+    return image.convert("RGBA")
 
 
 def _fallback_cell(block, face: str, px: int) -> Image.Image:
     name = block.id.replace("minecraft:", "")
     if name == "water":
         # The extracted client assets only retain water's animation metadata.
-        return Image.new("RGBA", (px, px), (35, 105, 230, 105))
+        return Image.new("RGBA", (px, px), (35, 105, 230, 255))
     if name.endswith("_door"):
         half = _props(block).get("half", "bottom")
         half = "top" if half == "upper" else "bottom"
@@ -413,7 +471,16 @@ def _fallback_cell(block, face: str, px: int) -> Image.Image:
         if (TEXTURE_DIR / f"{candidate}.png").exists():
             return v3.load_texture_rgba(candidate).resize((px, px), Image.Resampling.NEAREST)
     texture = _fallback_texture(name, face)
-    return v3.load_texture_rgba(texture).resize((px, px), Image.Resampling.NEAREST)
+    if texture:
+        return v3.load_texture_rgba(texture).resize((px, px), Image.Resampling.NEAREST)
+    for path in _resource_texture_paths(name):
+        if path.exists():
+            return Image.open(path).convert("RGBA").resize((px, px), Image.Resampling.NEAREST)
+    if face != "up":
+        top = render_model_face(block, "up", px)
+        if top.getbbox():
+            return top
+    return _purple_checker(px)
 
 
 def block_cell(block, face: str, px: int) -> Image.Image:
@@ -536,7 +603,7 @@ def _draw_piston_extension(canvas: Image.Image, reg, face: str, px: int) -> None
                     continue
                 if face == "up":
                     cx, cy = x - reg.minx(), z - reg.minz()
-                elif face == "south":
+                elif face in ("north", "south"):
                     cx, cy = x - reg.minx(), reg.maxy() - y
                 else:
                     cx, cy = z - reg.minz(), reg.maxy() - y
@@ -555,8 +622,8 @@ def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
         cells = ((ix, iz, [(y, reg[x, y, z]) for y in reversed(ry)])
                  for ix, x in enumerate(rx) for iz, z in enumerate(rz))
     elif axes == "xy":
-        width, height, face = len(rx), len(ry), "south"
-        cells = ((ix, len(ry) - 1 - iy, [(z, reg[x, y, z]) for z in rz])
+        width, height, face = len(rx), len(ry), "north"
+        cells = ((ix, len(ry) - 1 - iy, [(z, reg[x, y, z]) for z in reversed(rz)])
                  for ix, x in enumerate(rx) for iy, y in enumerate(ry))
     else:
         width, height, face = len(rz), len(ry), "west"
@@ -582,7 +649,10 @@ def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
                 continue
             block = layers[index][1]
             cell = block_cell(block, face, px)
-            cell = _apply_alpha(cell, 1.0 if index == 0 else 0.9 ** index)
+            if index > 0:
+                overlay = Image.new("RGBA", cell.size, (0, 0, 0, round(255 * 0.10)))
+                for _ in range(index):
+                    cell.alpha_composite(overlay)
             canvas.alpha_composite(cell, (cx * px, cy * px))
             occupied_cells.append((cx, cy))
         if max_layers > 1 and occupied_cells:
@@ -592,27 +662,89 @@ def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
     return canvas.convert("RGB")
 
 
+def _projection_cells(reg, axes: str):
+    """Return the existing V4 cell rays in the same orientation as V14 cameras."""
+    rx = list(range(reg.minx(), reg.maxx() + 1))
+    ry = list(range(reg.miny(), reg.maxy() + 1))
+    rz = list(range(reg.minz(), reg.maxz() + 1))
+    if axes == "xz":
+        return len(rx), len(rz), [
+            (ix, iz, [(y, reg[x, y, z]) for y in reversed(ry)])
+            for ix, x in enumerate(rx) for iz, z in enumerate(rz)]
+    if axes == "xy":
+        return len(rx), len(ry), [
+            (ix, len(ry) - 1 - iy, [(z, reg[x, y, z]) for z in reversed(rz)])
+            for ix, x in enumerate(rx) for iy, y in enumerate(ry)]
+    return len(rz), len(ry), [
+        (iz, len(ry) - 1 - iy, [(x, reg[x, y, z]) for x in reversed(rx)])
+        for iz, z in enumerate(rz) for iy, y in enumerate(ry)]
+
+
+def _finish_3d_projection(raw: Image.Image, reg, axes: str, px: int) -> Image.Image:
+    """Put a transparent Three.js view onto V4's approved background treatment."""
+    width, height, cells = _projection_cells(reg, axes)
+    canvas = _draw_checker_background(width, height, cells, px).convert("RGBA")
+    occupied = [(cx, cy) for cx, cy, ray in cells if not _is_air_cell(ray)]
+    if occupied:
+        _composite_layer_shadow(canvas, occupied, px)
+    canvas.alpha_composite(raw.convert("RGBA"))
+    return _draw_block_edges(canvas, cells, px).convert("RGB")
+
+
+def render_three_views_3d(reg, px: int, output_dir=Path("/tmp"), prefix="v14"):
+    """Serialize litemapy's block palette and invoke the Three.js renderer."""
+    blocks = []
+    for x in range(reg.minx(), reg.maxx() + 1):
+        for y in range(reg.miny(), reg.maxy() + 1):
+            for z in range(reg.minz(), reg.maxz() + 1):
+                block = reg[x, y, z]
+                if not block or v3.is_air(block.id):
+                    continue
+                blocks.append({
+                    "id": block.id, "properties": _props(block),
+                    "x": x, "y": y, "z": z,
+                })
+    manifest = {
+        "assets": str(ASSETS),
+        "min": [reg.minx(), reg.miny(), reg.minz()],
+        "size": {"x": reg.maxx() - reg.minx() + 1,
+                 "y": reg.maxy() - reg.miny() + 1,
+                 "z": reg.maxz() - reg.minz() + 1},
+        "px": px, "blocks": blocks,
+        "outputDir": str(output_dir), "prefix": prefix,
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8") as handle:
+        json.dump(manifest, handle)
+        handle.flush()
+        completed = subprocess.run(
+            ["node", str(ROOT / "render_3d.js"), "--manifest", handle.name],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        if completed.returncode:
+            raise RuntimeError(f"V14 renderer failed: {completed.stderr.strip()}")
+    if completed.stdout.strip():
+        print(f"V14 renderer: {completed.stdout.strip()}")
+    raw = [Image.open(output_dir / f"{prefix}_{view}.png").convert("RGBA")
+           for view in ("top", "front", "side")]
+    return tuple(_finish_3d_projection(image, reg, axes, px)
+                 for image, axes in zip(raw, ("xz", "xy", "yz")))
+
+
 def _load_item_texture(block_id: str, size: int = 32):
-    """材料列表用的方块贴图 - 按方块 id 取对应贴图"""
+    """材料列表图标：item、block、模型顶视图、紫黑格依次兜底。"""
     target = block_id.split("[")[0].replace("minecraft:", "")
-    candidates = [
-        f"{target}.png",
-        f"{target}_top.png",
-    ]
-    for c in candidates:
-        path = TEXTURE_DIR / c
+    for path in _resource_texture_paths(target):
         if path.exists():
             img = Image.open(path).convert("RGB")
             if img.size != (size, size):
                 img = img.resize((size, size), Image.NEAREST)
             return img
-    # 兜底: 紫黑格
-    img = Image.new("RGB", (size, size), (122, 31, 162))
-    for x in range(size):
-        for y in range(size):
-            if x % (size // 4) == 0 or y % (size // 4) == 0:
-                img.putpixel((x, y), (0, 0, 0))
-    return img
+    model_icon = block_cell(litemapy.BlockState(f"minecraft:{target}"), "up", size)
+    if model_icon.getbbox():
+        background = Image.new("RGBA", model_icon.size, "white")
+        background.alpha_composite(model_icon)
+        return background.convert("RGB")
+    return _purple_checker(size).convert("RGB")
 
 
 def make_layout_v4(img_xz, img_xy, img_yz, title: str, subtitle: str,
@@ -709,9 +841,13 @@ def main():
     schematic = litemapy.Schematic.load(str(path))
     reg = next(iter(schematic.regions.values()))
     print(f"=== {path.name}: {schematic.width}x{schematic.height}x{schematic.length} mode={args.mode} layers={max_layers} ===")
-    xz = render_projection(reg, "xz", px, max_layers)
-    xy = render_projection(reg, "xy", px, max_layers)
-    yz = render_projection(reg, "yz", px, max_layers)
+    if args.mode == "top":
+        xz, xy, yz = render_three_views_3d(reg, px)
+    else:
+        # Preserve V13's black-overlay X-ray semantics; V14 handles true surfaces.
+        xz = render_projection(reg, "xz", px, max_layers)
+        xy = render_projection(reg, "xy", px, max_layers)
+        yz = render_projection(reg, "yz", px, max_layers)
     counts = Counter()
     for x in range(reg.minx(), reg.maxx() + 1):
         for y in range(reg.miny(), reg.maxy() + 1):
@@ -723,7 +859,7 @@ def main():
     result = make_layout_v4(
         xz, xy, yz,
         title=path.stem,
-        subtitle=f"{schematic.width} × {schematic.height} × {schematic.length}    {mode_label}    V4 model projection",
+        subtitle=f"{schematic.width} × {schematic.height} × {schematic.length}    {mode_label}    V14 Three.js projection",
         stats=counts.most_common(),
     )
     result.save(out)

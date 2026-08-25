@@ -1,0 +1,15 @@
+{
+  "name": "litematic-render-v14",
+  "version": "14.0.0",
+  "private": true,
+  "description": "Three.js orthographic renderer for Minecraft litematics",
+  "main": "render_3d.js",
+  "scripts": {
+    "render": "node render_3d.js",
+    "test": "node render_3d.js --self-test"
+  },
+  "dependencies": {
+    "pngjs": "^7.0.0",
+    "three": "^0.180.0"
+  }
+}
