@@ -13,7 +13,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import litemapy
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
 import a_render_v3 as v3
 
@@ -403,6 +403,111 @@ def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
     return canvas.convert("RGB")
 
 
+def _load_item_texture(block_id: str, size: int = 32):
+    """材料列表用的方块贴图 - 按方块 id 取对应贴图"""
+    target = block_id.split("[")[0].replace("minecraft:", "")
+    candidates = [
+        f"{target}.png",
+        f"{target}_top.png",
+    ]
+    for c in candidates:
+        path = TEXTURE_DIR / c
+        if path.exists():
+            img = Image.open(path).convert("RGB")
+            if img.size != (size, size):
+                img = img.resize((size, size), Image.NEAREST)
+            return img
+    # 兜底: 紫黑格
+    img = Image.new("RGB", (size, size), (122, 31, 162))
+    for x in range(size):
+        for y in range(size):
+            if x % (size // 4) == 0 or y % (size // 4) == 0:
+                img.putpixel((x, y), (0, 0, 0))
+    return img
+
+
+def make_layout_v4(img_xz, img_xy, img_yz, title: str, subtitle: str,
+                   stats: list) -> Image.Image:
+    """V4 专属排版:
+    1. 顶部: 大字标题 (litematic 文件名) + 副标题 (尺寸/X 射线层数)
+    2. 三视图垂直堆叠 + 水平居中 + 左对齐 (同 x 坐标)
+    3. 底部: 材料列表 [贴图] 方块名 数量 (按数量降序)
+    """
+    pad = 32
+    label_h = 28
+    title_h = 56
+    subtitle_h = 28
+    item_h = 40   # 每行材料 (32px 贴图 + 居中文本)
+    item_pad = 8  # 材料行间距
+
+    # 字体 - 大
+    try:
+        font_title = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc", 32)
+        font_subtitle = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSansCJK.ttc", 18)
+        font_label = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc", 18)
+        font_item = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSansCJK.ttc", 16)
+        font_section = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc", 20)
+    except Exception:
+        font_title = font_subtitle = font_label = font_item = font_section = ImageFont.load_default()
+
+    # 三张图宽度取最大 → 同 x 起点对齐
+    views_w = max(img_xz.width, img_xy.width, img_yz.width)
+    views = [(img_xz, "俯视图 (Top, XZ) — 看向 -y, 顶面贴图"),
+             (img_xy, "正视图 (Front, XY) — 看向 +z, 南面贴图"),
+             (img_yz, "侧视图 (Side, YZ) — 看向 -x, 西面贴图")]
+
+    # 计算高度
+    views_h = sum(img.height + label_h + pad for img, _ in views)
+    list_h = (item_h + item_pad) * len(stats) + label_h + pad
+    total_w = views_w + 2 * pad
+    total_h = title_h + subtitle_h + views_h + list_h + 3 * pad
+
+    bg = Image.new("RGB", (total_w, total_h), (255, 255, 255))
+    draw = ImageDraw.Draw(bg)
+
+    # 1. 顶部标题
+    draw.text((pad, pad // 2), title, fill=(0, 0, 0), font=font_title)
+    draw.text((pad, pad // 2 + title_h - 8), subtitle, fill=(80, 80, 80), font=font_subtitle)
+
+    # 2. 三视图堆叠 + 居中
+    y = pad + title_h + subtitle_h + pad
+    for img, label in views:
+        # 标签在图片上方居中
+        bbox = draw.textbbox((0, 0), label, font=font_label)
+        text_w = bbox[2] - bbox[0]
+        x = (total_w - text_w) // 2
+        draw.text((x, y), label, fill=(0, 0, 0), font=font_label)
+        y += label_h
+        # 图片水平居中
+        x = (total_w - img.width) // 2
+        bg.paste(img, (x, y))
+        y += img.height + pad
+
+    # 3. 底部材料列表
+    section_y = y
+    draw.text((pad, section_y), f"材料清单 ({len(stats)} 种方块)", fill=(0, 0, 0), font=font_section)
+    y += label_h + 4
+
+    # 渲染每行 [贴图] 方块名 数量
+    for i, (block_id, count) in enumerate(stats):
+        # 贴图 32x32 (白底)
+        tex = _load_item_texture(block_id, 32)
+        if tex is not None:
+            # 1px 边框
+            tex_rgba = tex.convert("RGBA")
+            txd = ImageDraw.Draw(tex_rgba)
+            txd.rectangle([(0, 0), (31, 31)], outline=(180, 180, 180), width=1)
+            bg.paste(tex_rgba.convert("RGB"), (pad, y))
+        # 文本
+        name = block_id.replace("minecraft:", "")
+        text = f"{name}\t×{count}"
+        # tab 对齐: 贴图右 + 16px
+        draw.text((pad + 32 + 16, y + 8), text, fill=(0, 0, 0), font=font_item)
+        y += item_h + item_pad
+
+    return bg
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python3 a_render_v4.py input.litematic [out.png] [px=16] [layers=5]")
@@ -424,10 +529,10 @@ def main():
                 block = reg[x, y, z]
                 if block and not v3.is_air(block.id):
                     counts[block.id] += 1
-    result = v3.make_combined(
+    result = make_layout_v4(
         xz, xy, yz,
-        ["Top (XZ): model top faces", "Front (XY): model south faces", "Side (YZ): model west faces"],
-        title=f"{path.stem} ({schematic.width}x{schematic.height}x{schematic.length}) V4 model projection | X-ray {max_layers} layers",
+        title=path.stem,
+        subtitle=f"{schematic.width} × {schematic.height} × {schematic.length}    X-ray {max_layers} layers    V4 model projection",
         stats=counts.most_common(),
     )
     result.save(out)
