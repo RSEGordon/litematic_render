@@ -15,9 +15,10 @@ function model(assets,id,seen=new Set()){
 function resolveTexture(m,v){const seen=new Set();if(v&&typeof v==='object')v=v.sprite;while(typeof v==='string'&&v.startsWith('#')&&!seen.has(v)){seen.add(v);v=m.textures[v.slice(1)];if(v&&typeof v==='object')v=v.sprite}return typeof v==='string'?strip(v):null}
 function match(w,p){if(!w)return true;if(w.OR)return w.OR.some(x=>match(x,p));if(w.AND)return w.AND.every(x=>match(x,p));return Object.entries(w).every(([k,v])=>String(v).split('|').includes(String(p[k])))}
 function one(v){return Array.isArray(v)?(v.length?[v[0]]:[]):v?[v]:[]}
+function multipart(v){return one(v).map(a=>({...a,y:a.y?(360-a.y)%360:0}))}
 function applications(assets,b){const f=path.join(assets,'blockstates',strip(b.id)+'.json');if(!fs.existsSync(f))return[];const s=json(f),out=[];
  if(s.variants){let fallback;for(const[k,v]of Object.entries(s.variants)){fallback??=v;const q=Object.fromEntries(k.split(',').filter(Boolean).map(x=>x.split('=')));if(Object.entries(q).every(([a,z])=>String(b.properties[a])===z)){out.push(...one(v));fallback=null;break}}if(!out.length&&fallback)out.push(...one(fallback))}
- for(const p of s.multipart||[])if(match(p.when,b.properties))out.push(...one(p.apply));return out}
+ for(const p of s.multipart||[])if(match(p.when,b.properties))out.push(...multipart(p.apply));return out}
 function texture(assets,n){n=strip(n);if(T.has(n))return T.get(n);const f=path.join(assets,'textures/block',n+'.png');if(!fs.existsSync(f))return null;const p=PNG.sync.read(fs.readFileSync(f)),o={width:p.width,height:Math.min(p.width,p.height),data:p.data};T.set(n,o);return o}
 function waterTint(tx){if(tx.water)return tx.water;const data=Buffer.from(tx.data);for(let i=0;i<data.length;i+=4){const light=data[i]/255;data[i]=Math.round(64*light);data[i+1]=Math.round(118*light);data[i+2]=Math.round(228*light)}return tx.water={width:tx.width,height:tx.height,data}}
 function uvs(face){const u=face.uv||[0,0,16,16];let q=[[u[0],u[3]],[u[2],u[3]],[u[2],u[1]],[u[0],u[1]]];for(let i=0;i<(+face.rotation||0)/90;i++)q=[q[1],q[2],q[3],q[0]];return q}
