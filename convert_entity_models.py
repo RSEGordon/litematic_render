@@ -87,6 +87,15 @@ def convert_cube(cube, matrix, texture_size):
         'up': [u + d, v, u + d + w, v + d],
         'down': [u + d + w, v, u + d + 2*w, v + d],
     }
+    # ModelPart Y is reflected into THREE.js Y-up space after conversion.  On
+    # the four vertical faces that reflection swaps the first vertex pair from
+    # the cube bottom to the cube top.  render_3d.js maps [u0,v0,u1,v1] as
+    # [v1,v1,v0,v0], so reverse the V endpoints to keep Mojang's top texels on
+    # the reflected cube top.  Up/down use texture V along Z and are unaffected
+    # by the Y reflection.
+    for direction in ('west', 'north', 'east', 'south'):
+        u0, v0, u1, v1 = boxes[direction]
+        boxes[direction] = [u0, v1, u1, v0]
     faces = {direction: {'uv': norm(box), 'texture': '#0'} for direction, box in boxes.items()}
 
     return {
