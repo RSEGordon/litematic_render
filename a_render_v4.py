@@ -735,13 +735,22 @@ def render_three_views_3d(reg, px: int, output_dir=Path("/tmp"), prefix="v14",
                     "id": block.id, "properties": _props(block),
                     "x": x, "y": y, "z": z,
                 })
+    entities = []
+    for ent in reg.entities:
+        pos = getattr(ent, "pos", None) or getattr(ent, "position", (0, 0, 0))
+        rotation = getattr(ent, "rotation", (0, 0))
+        entities.append({
+            "id": str(ent.id),
+            "x": float(pos[0]), "y": float(pos[1]), "z": float(pos[2]),
+            "rotation_y": float(rotation[1]) if len(rotation) > 1 else 0,
+        })
     manifest = {
         "assets": str(ASSETS),
         "min": [reg.minx(), reg.miny(), reg.minz()],
         "size": {"x": reg.maxx() - reg.minx() + 1,
                  "y": reg.maxy() - reg.miny() + 1,
                  "z": reg.maxz() - reg.minz() + 1},
-        "px": px, "blocks": blocks,
+        "px": px, "blocks": blocks, "entities": entities,
         "outputDir": str(output_dir), "prefix": prefix,
         "views": ["top", "front", "side", "iso"] if include_iso else
                  ["top", "front", "side"],
