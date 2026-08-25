@@ -14,19 +14,39 @@ textures: {"0": "entity/<name>/<tex>"}
 import json
 import os
 import sys
+import math
 from pathlib import Path
 
 SRC_DIR = Path('/tmp/allay_search/EntityModelJson/vanilla_layers/main')
 DST_DIR = Path('/home/rsegordon/.hermes/scripts/litematic_render/client_assets/assets/minecraft/models/entity')
 
-# 缩放因子: MC box 模型用 0-16 整数像素 (实体大小 16 像素 = 1 块)
-# SizableShrimp 用 float 像素 (0-24 范围). 缩放到 0-16 范围
-# entity 大小约 16 像素 = 1 块. 单位 px / SCALE
-# SCALE=1.5 看起来太大, 改用 0.67 把 0-24 缩到 0-16
-SCALE = 0.67
+# Entity textures keep their native pixel dimensions; transformed geometry is
+# uniformly fitted to the renderer's 0..16 model space after all bones are read.
+TEXTURE_DIR = DST_DIR.parents[1] / 'textures' / 'entity'
 
 
-def convert_cube(cube, part_pos, textures, face_count):
+def mat_mul(a, b):
+    return [[sum(a[r][k] * b[k][c] for k in range(4)) for c in range(4)] for r in range(4)]
+
+
+def pose_matrix(pose):
+    """Minecraft ModelPart pose: translate, then Z/Y/X rotations (angles are radians)."""
+    x, y, z = (pose.get(k, 0.0) for k in ('x', 'y', 'z'))
+    rx, ry, rz = (pose.get(k, 0.0) for k in ('xRot', 'yRot', 'zRot'))
+    cx, sx, cy, sy, cz, sz = math.cos(rx), math.sin(rx), math.cos(ry), math.sin(ry), math.cos(rz), math.sin(rz)
+    t = [[1, 0, 0, x], [0, 1, 0, y], [0, 0, 1, z], [0, 0, 0, 1]]
+    mx = [[1, 0, 0, 0], [0, cx, -sx, 0], [0, sx, cx, 0], [0, 0, 0, 1]]
+    my = [[cy, 0, sy, 0], [0, 1, 0, 0], [-sy, 0, cy, 0], [0, 0, 0, 1]]
+    mz = [[cz, -sz, 0, 0], [sz, cz, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+    return mat_mul(t, mat_mul(mz, mat_mul(my, mx)))
+
+
+def transform_point(matrix, point):
+    p = [*point, 1.0]
+    return [sum(matrix[r][k] * p[k] for k in range(4)) for r in range(3)]
+
+
+def convert_cube(cube, matrix, texture_size):
     """单个 cube → element {from, to, faces}
 
     origin 是 cube 最小角相对当前 bone 原点的偏移 (SizableShrimp 用 box 中心为 0,0,0)。
@@ -39,60 +59,59 @@ def convert_cube(cube, part_pos, textures, face_count):
 
     # grow 让边缘变细 (mc 内部用), 我们忽略 (改为实际尺寸)
 
-    # 转 16 像素基准 + 父 part_pos 偏移
-    # MC box 模型: from [0,0,0] to [16,16,16] = 1 块
-    # 实体: 中心 (8, 8, 8), 实体大小约 1 块
-    # 直接用 0-24 范围 (SizableShrimp 默认), 但渲染器按 (x-8)/16 居中
-    fx = (ox + part_pos[0]) * SCALE + 8
-    fy = (oy + part_pos[1]) * SCALE + 8
-    fz = (oz + part_pos[2]) * SCALE + 8
-    tx = (ox + w + part_pos[0]) * SCALE + 8
-    ty = (oy + h + part_pos[1]) * SCALE + 8
-    tz = (oz + d + part_pos[2]) * SCALE + 8
-
-    # 如果某个维度是 0 (翅膀薄板), 给 1 像素厚度
-    if tx - fx < 0.5:
-        tx = fx + 1
-    if ty - fy < 0.5:
-        ty = fy + 1
-    if tz - fz < 0.5:
-        tz = fz + 1
+    # Keep native cube dimensions. Bone transforms are applied to every vertex;
+    # this preserves rotated limbs instead of flattening them into an AABB.
+    x1, y1, z1 = ox + w, oy + h, oz + d
+    corners = {(x, y, z): transform_point(matrix, (x, y, z))
+               for x in (ox, x1) for y in (oy, y1) for z in (oz, z1)}
+    vertex_keys = {
+        'east': [(x1, oy, oz), (x1, oy, z1), (x1, y1, z1), (x1, y1, oz)],
+        'west': [(ox, oy, z1), (ox, oy, oz), (ox, y1, oz), (ox, y1, z1)],
+        'up': [(ox, y1, oz), (x1, y1, oz), (x1, y1, z1), (ox, y1, z1)],
+        'down': [(ox, oy, z1), (x1, oy, z1), (x1, oy, oz), (ox, oy, oz)],
+        'south': [(x1, oy, z1), (ox, oy, z1), (ox, y1, z1), (x1, y1, z1)],
+        'north': [(ox, oy, oz), (x1, oy, oz), (x1, y1, oz), (ox, y1, oz)],
+    }
 
     u, v = cube.get('texCoord', {}).get('u', 0), cube.get('texCoord', {}).get('v', 0)
-    # 简化: 整个 cube 用同 UV box (按 w/d/h 拆分六个面)
-    w_px, h_px, d_px = w * SCALE, h * SCALE, d * SCALE
-    faces = {}
-    # 简化: 所有面用全 UV
-    faces['west']  = {'uv': [u, v, u + d_px, v + h_px], 'texture': '#0'}
-    faces['east']  = {'uv': [u + d_px, v, u + d_px + d_px, v + h_px], 'texture': '#0'}
-    faces['up']    = {'uv': [u + d_px, v, u + d_px + w_px, v + d_px], 'texture': '#0'}
-    faces['down']  = {'uv': [u + d_px + w_px, v, u + d_px + w_px + w_px, v + d_px], 'texture': '#0'}
-    faces['north'] = {'uv': [u + d_px + w_px + d_px, v, u + d_px + w_px + d_px + d_px, v + h_px], 'texture': '#0'}
-    faces['south'] = {'uv': [u + d_px + w_px + d_px + d_px, v, u + d_px + w_px + d_px + d_px + d_px, v + h_px], 'texture': '#0'}
+    # Vanilla CubeListBuilder unfolding. UVs stay in source texture pixels and
+    # are normalized to the renderer's 0..16 convention using material size.
+    tw, th = texture_size
+    norm = lambda box: [box[0] * 16 / tw, box[1] * 16 / th,
+                        box[2] * 16 / tw, box[3] * 16 / th]
+    boxes = {
+        'west': [u, v + d, u + d, v + d + h],
+        'north': [u + d, v + d, u + d + w, v + d + h],
+        'east': [u + d + w, v + d, u + 2*d + w, v + d + h],
+        'south': [u + 2*d + w, v + d, u + 2*d + 2*w, v + d + h],
+        'up': [u + d, v, u + d + w, v + d],
+        'down': [u + d + w, v, u + d + 2*w, v + d],
+    }
+    faces = {direction: {'uv': norm(box), 'texture': '#0'} for direction, box in boxes.items()}
 
     return {
-        'from': [round(fx, 2), round(fy, 2), round(fz, 2)],
-        'to':   [round(tx, 2), round(ty, 2), round(tz, 2)],
+        'vertices': {direction: [[round(c, 5) for c in corners[key]] for key in keys]
+                     for direction, keys in vertex_keys.items()},
         'faces': faces,
     }
 
 
-def walk_bones(bones, pos, elements, textures):
+def walk_bones(bones, parent_matrix, elements, texture_size):
     """递归遍历 bones/cubes/children"""
     for name, bone in bones.items():
         if not isinstance(bone, dict):
             continue
         # partPose 是相对父 part 的偏移
         pose = bone.get('partPose', {})
-        new_pos = [pos[0] + pose.get('x', 0), pos[1] + pose.get('y', 0), pos[2] + pose.get('z', 0)]
+        matrix = mat_mul(parent_matrix, pose_matrix(pose))
 
         # cubes
         for cube in bone.get('cubes', []):
-            elements.append(convert_cube(cube, new_pos, textures, len(elements)))
+            elements.append(convert_cube(cube, matrix, texture_size))
 
         # 递归 children
         if 'children' in bone:
-            walk_bones(bone['children'], new_pos, elements, textures)
+            walk_bones(bone['children'], matrix, elements, texture_size)
 
 
 def convert_one(name):
@@ -103,12 +122,14 @@ def convert_one(name):
         data = json.load(f)
 
     elements = []
-    textures = {}
+    material = data.get('material', {})
+    texture_size = (float(material.get('xTexSize', 64)), float(material.get('yTexSize', 64)))
     # 从 mesh.root.children 开始
     if 'mesh' not in data:
         return False
     root = data['mesh']['root']
-    walk_bones(root.get('children', {}), [0, 0, 0], elements, textures)
+    identity = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+    walk_bones(root.get('children', {}), identity, elements, texture_size)
 
     if not elements:
         return False
@@ -121,13 +142,30 @@ def convert_one(name):
     # stripped "allay/allay" = "allay/allay"  →  textures/entity/allay/allay.png ✓
     # minecart 类型 (hopper_minecart / chest_minecart / tnt_minecart 等)
     # 都用 minecart.png 在 textures/entity/minecart/ 子目录
-    if name == 'allay':
-        textures = {'0': 'allay/allay'}
-    elif 'minecart' in name:
-        textures = {'0': 'minecart/minecart'}
+    # Uniformly fit the complete transformed model into one block. X/Z are
+    # centered around 8; Y starts at 0 so the entity position remains its feet.
+    points = [point for element in elements for face in element['vertices'].values() for point in face]
+    mins = [min(p[i] for p in points) for i in range(3)]
+    maxs = [max(p[i] for p in points) for i in range(3)]
+    spans = [maxs[i] - mins[i] for i in range(3)]
+    scale = 16 / max(max(spans), 1e-9)
+    offsets = [8 - (mins[0] + maxs[0]) * scale / 2, -mins[1] * scale,
+               8 - (mins[2] + maxs[2]) * scale / 2]
+    for element in elements:
+        for face, vertices in element['vertices'].items():
+            element['vertices'][face] = [[round(p[i] * scale + offsets[i], 5) for i in range(3)]
+                                         for p in vertices]
+
+    if 'minecart' in name:
+        texture_name = 'minecart/minecart'
     else:
-        # 其他实体贴图直接在 textures/entity/<name>.png
-        textures = {'0': name}
+        candidates = [name, f'{name}/{name}']
+        # Common vanilla families use a subdirectory for their base skin.
+        family = name.removeprefix('cave_').removeprefix('zombie_')
+        candidates += [f'{family}/{name}', f'{family}/{family}']
+        texture_name = next((candidate for candidate in candidates
+                             if (TEXTURE_DIR / f'{candidate}.png').exists()), name)
+    textures = {'0': texture_name}
 
     # 添加 ambientocclusion: false
     out = {
