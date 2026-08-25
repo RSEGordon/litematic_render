@@ -722,8 +722,11 @@ def _finish_3d_projection(raw: Image.Image, reg, axes: str, px: int) -> Image.Im
 
 
 def render_three_views_3d(reg, px: int, output_dir=Path("/tmp"), prefix="v14",
-                          include_iso: bool = False):
+                          include_iso: bool = False, chunk_size: int | None = None):
     """Serialize litemapy's block palette and invoke the Three.js renderer."""
+    if chunk_size:
+        return _render_three_views_3d_chunked(
+            reg, px, output_dir, prefix, include_iso, chunk_size)
     blocks = []
     for x in range(reg.minx(), reg.maxx() + 1):
         for y in range(reg.miny(), reg.maxy() + 1):
@@ -773,6 +776,115 @@ def render_three_views_3d(reg, px: int, output_dir=Path("/tmp"), prefix="v14",
            for view in ("top", "front", "side")]
     return tuple(_finish_3d_projection(image, reg, axes, px)
                  for image, axes in zip(raw, ("xz", "xy", "yz")))
+
+
+def _render_three_views_3d_chunked(reg, px: int, output_dir: Path, prefix: str,
+                                   include_iso: bool, chunk_size: int):
+    """Render bounded block batches and composite them back-to-front.
+
+    Every Node invocation retains the global camera and canvas, but owns only
+    one chunk's faces.  A one-block context halo is supplied for water and
+    piston adjacency without rendering duplicate models at chunk boundaries.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    views = ["top", "front", "side"] + (["iso"] if include_iso else [])
+    size = {"x": reg.maxx() - reg.minx() + 1,
+            "y": reg.maxy() - reg.miny() + 1,
+            "z": reg.maxz() - reg.minz() + 1}
+    dimensions = {
+        "top": (max(1, round(size["x"] * px)), max(1, round(size["z"] * px))),
+        "front": (max(1, round(size["x"] * px)), max(1, round(size["y"] * px))),
+        "side": (max(1, round(size["z"] * px)), max(1, round(size["y"] * px))),
+        # pngjs/Buffer allocation truncates the renderer's fractional ISO
+        # dimensions, so mirror that here for exact alpha-composite sizing.
+        "iso": (max(1, int((size["x"] + size["z"]) / math.sqrt(2) * 1.02 * px)),
+                max(1, int((size["x"] + 2 * size["y"] + size["z"]) /
+                           math.sqrt(6) * 1.02 * px))),
+    }
+    composites = {view: Image.new("RGBA", dimensions[view], (0, 0, 0, 0))
+                  for view in views}
+    chunks = []
+    for x0 in range(reg.minx(), reg.maxx() + 1, chunk_size):
+        for y0 in range(reg.miny(), reg.maxy() + 1, chunk_size):
+            for z0 in range(reg.minz(), reg.maxz() + 1, chunk_size):
+                chunks.append((x0, min(x0 + chunk_size - 1, reg.maxx()),
+                               y0, min(y0 + chunk_size - 1, reg.maxy()),
+                               z0, min(z0 + chunk_size - 1, reg.maxz())))
+
+    entities = []
+    for ent in reg.entities:
+        pos = getattr(ent, "pos", None) or getattr(ent, "position", (0, 0, 0))
+        rotation = getattr(ent, "rotation", (0, 0))
+        entities.append({"id": str(ent.id), "x": float(pos[0]),
+                         "y": float(pos[1]), "z": float(pos[2]),
+                         "rotation_y": float(rotation[0]) if len(rotation) else 0,
+                         "rotation_x": float(rotation[1]) if len(rotation) > 1 else 0})
+
+    # Separate painter orders are required because each view looks from a
+    # different positive axis.  ISO looks from positive X/Y/Z.
+    depth_key = {
+        "top": lambda c: c[2] + c[3],
+        "front": lambda c: c[4] + c[5],
+        "side": lambda c: c[0] + c[1],
+        "iso": lambda c: sum(c),
+    }
+    with tempfile.TemporaryDirectory(prefix="litematic_chunks_") as tmp_name:
+        tmp = Path(tmp_name)
+        for view in views:
+            rendered = 0
+            for index, bounds in enumerate(sorted(chunks, key=depth_key[view])):
+                x0, x1, y0, y1, z0, z1 = bounds
+                blocks = []
+                for x in range(x0, x1 + 1):
+                    for y in range(y0, y1 + 1):
+                        for z in range(z0, z1 + 1):
+                            block = reg[x, y, z]
+                            if block is not None and not v3.is_air(block.id):
+                                blocks.append({"id": block.id, "properties": _props(block),
+                                               "x": x, "y": y, "z": z})
+                chunk_entities = [e for e in entities
+                                  if x0 <= e["x"] < x1 + 1 and
+                                     y0 <= e["y"] < y1 + 1 and
+                                     z0 <= e["z"] < z1 + 1]
+                if not blocks and not chunk_entities:
+                    continue
+                context = []
+                for x in range(max(reg.minx(), x0 - 1), min(reg.maxx(), x1 + 1) + 1):
+                    for y in range(max(reg.miny(), y0 - 1), min(reg.maxy(), y1 + 1) + 1):
+                        for z in range(max(reg.minz(), z0 - 1), min(reg.maxz(), z1 + 1) + 1):
+                            if x0 <= x <= x1 and y0 <= y <= y1 and z0 <= z <= z1:
+                                continue
+                            block = reg[x, y, z]
+                            if block is not None and (block.id in {"minecraft:water", "minecraft:bubble_column", "minecraft:piston_head"}):
+                                context.append({"id": block.id, "properties": _props(block),
+                                                "x": x, "y": y, "z": z})
+                chunk_prefix = f"chunk_{view}_{index}"
+                manifest = {"assets": str(ASSETS),
+                            "min": [reg.minx(), reg.miny(), reg.minz()],
+                            "size": size, "px": px, "blocks": blocks,
+                            "contextBlocks": context, "entities": chunk_entities,
+                            "outputDir": str(tmp), "prefix": chunk_prefix,
+                            "views": [view]}
+                manifest_path = tmp / f"{chunk_prefix}.json"
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                completed = subprocess.run(
+                    ["node", str(ROOT / "render_3d.js"), "--manifest", str(manifest_path)],
+                    cwd=ROOT, text=True, capture_output=True)
+                if completed.returncode:
+                    raise RuntimeError(f"V14 chunk renderer failed ({view} {bounds}): "
+                                       f"{completed.stderr.strip()}")
+                image_path = tmp / f"{chunk_prefix}_{view}.png"
+                with Image.open(image_path) as image:
+                    composites[view].alpha_composite(image.convert("RGBA"))
+                image_path.unlink()
+                manifest_path.unlink()
+                rendered += 1
+            composites[view].save(output_dir / f"{prefix}_{view}.png")
+            print(f"V14 streaming: {view} composited from {rendered} non-empty chunks")
+
+    return tuple(_finish_3d_projection(composites[view], reg, axes, px)
+                 for view, axes in zip(("top", "front", "side"), ("xz", "xy", "yz")))
 
 
 def _load_item_texture(block_id: str, size: int = 32):
@@ -879,7 +991,11 @@ def main():
                    help="top: only y=max_y for every view; xray: top N layers with 10%% fade (default top)")
     p.add_argument("--iso", action="store_true",
                    help="also render an isometric orthographic view to /tmp/v16_iso.png")
+    p.add_argument("--chunk", type=int, default=None, metavar="BLOCKS",
+                   help="stream Three.js rendering in BLOCKS-cubed chunks (for large files)")
     args = p.parse_args()
+    if args.chunk is not None and args.chunk < 1:
+        p.error("--chunk must be a positive integer")
 
     path = Path(args.input)
     out = Path(args.out) if args.out else path.with_suffix(".v4.png")
@@ -890,7 +1006,8 @@ def main():
     print(f"=== {path.name}: {schematic.width}x{schematic.height}x{schematic.length} mode={args.mode} layers={max_layers} ===")
     if args.mode == "top":
         xz, xy, yz = render_three_views_3d(
-            reg, px, prefix="v16" if args.iso else "v14", include_iso=args.iso)
+            reg, px, prefix="v16" if args.iso else "v14", include_iso=args.iso,
+            chunk_size=args.chunk)
     else:
         # Preserve V13's black-overlay X-ray semantics; V14 handles true surfaces.
         xz = render_projection(reg, "xz", px, max_layers)
