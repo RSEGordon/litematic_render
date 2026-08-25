@@ -24,6 +24,41 @@ BLOCKSTATE_DIR = ASSETS / "blockstates"
 TEXTURE_DIR = ASSETS / "textures/block"
 
 
+def _piston_extension_model(platform: str) -> dict:
+    """Return Minecraft's dynamic piston arm as an in-code virtual model."""
+    return {
+        "textures": {"platform": platform, "side": "piston_side"},
+        "elements": [
+            {
+                "from": [7, 0, 0], "to": [9, 16, 2], "shade": False,
+                "faces": {
+                    "down": {"uv": [7, 0, 9, 2], "texture": "#side"},
+                    "up": {"uv": [7, 14, 9, 16], "texture": "#side"},
+                    "north": {"uv": [7, 0, 9, 16], "texture": "#side"},
+                    "south": {"uv": [7, 0, 9, 16], "texture": "#side"},
+                    "west": {"uv": [0, 0, 2, 16], "texture": "#side"},
+                    "east": {"uv": [14, 0, 16, 16], "texture": "#side"},
+                },
+            },
+            {
+                "from": [6, 0, 2], "to": [10, 4, 4], "shade": False,
+                "faces": {
+                    "down": {"uv": [6, 12, 10, 14], "texture": "#side"},
+                    "up": {"uv": [6, 2, 10, 4], "texture": "#side"},
+                    "north": {"uv": [6, 12, 10, 16], "texture": "#platform"},
+                    "south": {"uv": [6, 12, 10, 16], "texture": "#side"},
+                    "west": {"uv": [12, 12, 14, 16], "texture": "#side"},
+                    "east": {"uv": [2, 12, 4, 16], "texture": "#side"},
+                },
+            },
+        ],
+    }
+
+
+_PISTON_EXTENSION_MODEL_STICKY = _piston_extension_model("piston_top_sticky")
+_PISTON_EXTENSION_MODEL_NORMAL = _piston_extension_model("piston_top")
+
+
 def _strip_model(value: str) -> str:
     return value.replace("minecraft:", "").removeprefix("block/")
 
@@ -230,6 +265,45 @@ def render_model_face(block, view_face: str, px: int) -> Image.Image:
     return cell
 
 
+def _render_piston_extension(face: str, px: int, sticky: bool,
+                             facing: str) -> Image.Image:
+    """Render the virtual extension model in the base block's cell."""
+    rotations = {
+        "down": (90, 0), "east": (0, 90), "north": (0, 0),
+        "south": (0, 180), "up": (270, 0), "west": (0, 270),
+    }
+    xr, yr = rotations[facing]
+    model = (_PISTON_EXTENSION_MODEL_STICKY if sticky
+             else _PISTON_EXTENSION_MODEL_NORMAL)
+    drawables = []
+    for element in model["elements"]:
+        lo, hi = element["from"], element["to"]
+        corners = [_rotate_point((x, y, z), xr, yr)
+                   for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
+                   for z in (lo[2], hi[2])]
+        rect = _project_box(corners, face)
+        for model_face, face_def in element["faces"].items():
+            if _rotate_normal(model_face, xr, yr) != face:
+                continue
+            tex_name = _texture_name(face_def, model["textures"])
+            if tex_name:
+                drawables.append((rect[4], rect[:4], tex_name,
+                                  model_face, face_def))
+
+    cell = Image.new("RGBA", (px, px))
+    scale = px / 16
+    for _, (x0, y0, x1, y1), tex_name, model_face, face_def in sorted(drawables):
+        left, top = round(x0 * scale), round(y0 * scale)
+        right, bottom = round(x1 * scale), round(y1 * scale)
+        right, bottom = max(right, left + 1), max(bottom, top + 1)
+        texture = _crop_uv(v3.load_texture_rgba(tex_name), face_def)
+        texture = _orient_variant_uv(texture, model_face, face, xr, yr)
+        texture = texture.resize((right - left, bottom - top),
+                                 Image.Resampling.NEAREST)
+        cell.alpha_composite(texture, (left, top))
+    return cell
+
+
 def _redstone_color(power: int):
     strength = max(0, min(15, power)) / 15
     return (round(255 * (strength * .6 + (.4 if power else .3))),
@@ -432,6 +506,45 @@ def _draw_block_edges(canvas: Image.Image, cells, px: int) -> Image.Image:
     return canvas
 
 
+def _draw_piston_extension(canvas: Image.Image, reg, face: str, px: int) -> None:
+    """Draw valid dynamic piston arms before projected block layers."""
+    offsets = {
+        "down": (0, -1, 0), "up": (0, 1, 0),
+        "north": (0, 0, -1), "south": (0, 0, 1),
+        "west": (-1, 0, 0), "east": (1, 0, 0),
+    }
+    base_ids = {"minecraft:piston", "minecraft:sticky_piston"}
+    for x in range(reg.minx(), reg.maxx() + 1):
+        for y in range(reg.miny(), reg.maxy() + 1):
+            for z in range(reg.minz(), reg.maxz() + 1):
+                base = reg[x, y, z]
+                properties = _props(base)
+                facing = properties.get("facing")
+                if (base.id not in base_ids or
+                        properties.get("extended") != "true" or
+                        facing not in offsets):
+                    continue
+                dx, dy, dz = offsets[facing]
+                hx, hy, hz = x + dx, y + dy, z + dz
+                if not (reg.minx() <= hx <= reg.maxx() and
+                        reg.miny() <= hy <= reg.maxy() and
+                        reg.minz() <= hz <= reg.maxz()):
+                    continue
+                head = reg[hx, hy, hz]
+                if (head.id != "minecraft:piston_head" or
+                        _props(head).get("facing") != facing):
+                    continue
+                if face == "up":
+                    cx, cy = x - reg.minx(), z - reg.minz()
+                elif face == "south":
+                    cx, cy = x - reg.minx(), reg.maxy() - y
+                else:
+                    cx, cy = z - reg.minz(), reg.maxy() - y
+                cell = _render_piston_extension(
+                    face, px, base.id == "minecraft:sticky_piston", facing)
+                canvas.alpha_composite(cell, (cx * px, cy * px))
+
+
 def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
     """Render a projection back-to-front so translucent deeper layers remain visible."""
     rx = list(range(reg.minx(), reg.maxx() + 1))
@@ -460,6 +573,7 @@ def render_projection(reg, axes: str, px=16, max_layers=5) -> Image.Image:
                   if block and not v3.is_air(block.id)][:max_layers])
         for cx, cy, ray in cell_list
     ]
+    _draw_piston_extension(canvas, reg, face, px)
     # Paste complete depth layers deepest first so each gets one combined outer shadow.
     for index in reversed(range(max_layers)):
         occupied_cells = []
