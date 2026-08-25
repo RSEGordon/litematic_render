@@ -357,29 +357,28 @@ def convert_one(name):
     # stripped "allay/allay" = "allay/allay"  →  textures/entity/allay/allay.png ✓
     # minecart 类型 (hopper_minecart / chest_minecart / tnt_minecart 等)
     # 都用 minecart.png 在 textures/entity/minecart/ 子目录
-    # Scale each model axis to the vanilla 26.2 hitbox instead of fitting the
-    # largest model span into an arbitrary one-block cube. ModelPart Y grows
-    # downward, opposite to THREE.js, so reflect Y after grounding the minimum.
+    # Fit the model into one render block (16 px). MC Java's PoseStack
+    # scaling for living entities is `LivingEntity.getScale()` (default 1.0),
+    # so the visual size on screen equals the model cube span itself — not
+    # the EntityType.EntityDimensions hitbox. The hitbox can be smaller
+    # than the model (allay hitbox is 0.35 wide but its cubes span ~1.0
+    # block visually), so fitting to hitbox shrinks the rendering. V36-V37
+    # confirmed the 16/max(spans) fit matches what the player sees in
+    # vanilla; restore that behaviour.
     points = [point for element in elements for face in element['vertices'].values() for point in face]
     mins = [min(p[i] for p in points) for i in range(3)]
     maxs = [max(p[i] for p in points) for i in range(3)]
     spans = [maxs[i] - mins[i] for i in range(3)]
-    dimensions = ENTITY_DIMENSIONS.get(name)
-    if dimensions is None:
-        # The layer dump also contains non-entity render layers (beds, chests,
-        # shields, skulls, etc.). They have no EntityType hitbox and must not be
-        # silently assigned the old arbitrary one-block fit.
-        return False
-    width, height = dimensions
-    targets = [width * 16, height * 16, width * 16]
-    scales = [targets[i] / max(spans[i], 1e-9) for i in range(3)]
-    offsets = [8 - (mins[0] + maxs[0]) * scales[0] / 2,
-               -mins[1] * scales[1],
-               8 - (mins[2] + maxs[2]) * scales[2] / 2]
+    scale = 16 / max(max(spans), 1e-9)
+    scales = [scale, scale, scale]
+    targets = [spans[i] * scale for i in range(3)]
+    offsets = [8 - (mins[0] + maxs[0]) * scale / 2,
+               -mins[1] * scale,
+               8 - (mins[2] + maxs[2]) * scale / 2]
     for element in elements:
         for face, vertices in element['vertices'].items():
-            normalized = [[p[i] * scales[i] + offsets[i] for i in range(3)] for p in vertices]
-            element['vertices'][face] = [[round(p[0], 5), round(targets[1] - p[1], 5), round(p[2], 5)]
+            normalized = [[p[i] * scale + offsets[i] for i in range(3)] for p in vertices]
+            element['vertices'][face] = [[round(p[0], 5), round(16 - p[1], 5), round(p[2], 5)]
                                          for p in normalized]
 
     if 'minecart' in name:
