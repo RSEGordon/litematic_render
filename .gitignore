@@ -1,0 +1,36 @@
+# Python (脚本代码 + test litematic)
+__pycache__/
+*.pyc
+
+# 我们自己写的 model resolver 和 blockstate 映射结果（缓存）
+*.cache/
+*.json
+
+# 客户端资源 - 由代码运行时从 Minecraft client.jar 抽取
+# codex 不要 commit 这些，runtime 重新生成
+client_assets/
+
+# 测试输出
+*.png
+*.jpg
+output/
+test_output/
+screenshots/
+__pycache__/
+*.bak
+
+# Python
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
