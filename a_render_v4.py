@@ -742,7 +742,10 @@ def render_three_views_3d(reg, px: int, output_dir=Path("/tmp"), prefix="v14",
         entities.append({
             "id": str(ent.id),
             "x": float(pos[0]), "y": float(pos[1]), "z": float(pos[2]),
-            "rotation_y": float(rotation[1]) if len(rotation) > 1 else 0,
+            # Minecraft's Rotation list is [yaw, pitch]. Keep both components
+            # named by the axis the renderer uses rather than by tuple index.
+            "rotation_y": float(rotation[0]) if len(rotation) > 0 else 0,
+            "rotation_x": float(rotation[1]) if len(rotation) > 1 else 0,
         })
     manifest = {
         "assets": str(ASSETS),
