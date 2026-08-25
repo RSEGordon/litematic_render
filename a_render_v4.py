@@ -428,17 +428,17 @@ def _load_item_texture(block_id: str, size: int = 32):
 
 def make_layout_v4(img_xz, img_xy, img_yz, title: str, subtitle: str,
                    stats: list) -> Image.Image:
-    """V4 专属排版:
-    1. 顶部: 大字标题 (litematic 文件名) + 副标题 (尺寸/X 射线层数)
-    2. 三视图垂直堆叠 + 水平居中 + 左对齐 (同 x 坐标)
+    """V4 专属排版 (8-25 老板原话 三视图横向 1x3):
+    1. 顶部: 大字标题 (litematic 文件名) + 副标题 (尺寸/层模式)
+    2. 三视图横向 1x3 并排: 俯视 | 正视 | 侧视
     3. 底部: 材料列表 [贴图] 方块名 数量 (按数量降序)
     """
     pad = 32
     label_h = 28
     title_h = 56
     subtitle_h = 28
-    item_h = 40   # 每行材料 (32px 贴图 + 居中文本)
-    item_pad = 8  # 材料行间距
+    item_h = 40
+    item_pad = 8
 
     # 字体 - 大
     try:
@@ -450,16 +450,14 @@ def make_layout_v4(img_xz, img_xy, img_yz, title: str, subtitle: str,
     except Exception:
         font_title = font_subtitle = font_label = font_item = font_section = ImageFont.load_default()
 
-    # 三张图宽度取最大 → 同 x 起点对齐
-    views_w = max(img_xz.width, img_xy.width, img_yz.width)
-    views = [(img_xz, "俯视图 (Top, XZ) — 看向 -y, 顶面贴图"),
-             (img_xy, "正视图 (Front, XY) — 看向 +z, 南面贴图"),
-             (img_yz, "侧视图 (Side, YZ) — 看向 -x, 西面贴图")]
-
-    # 计算高度
-    views_h = sum(img.height + label_h + pad for img, _ in views)
+    views = [(img_xz, "俯视图 (Top, XZ) — 看向 -y"),
+             (img_xy, "正视图 (Front, XY) — 看向 +z"),
+             (img_yz, "侧视图 (Side, YZ) — 看向 -x")]
+    # 三视图横向并排: 总宽 = 三图宽之和 + 3*pad
+    views_h = max(img.height for img, _ in views) + label_h
+    views_w = sum(img.width for img, _ in views) + 4 * pad
     list_h = (item_h + item_pad) * len(stats) + label_h + pad
-    total_w = views_w + 2 * pad
+    total_w = views_w
     total_h = title_h + subtitle_h + views_h + list_h + 3 * pad
 
     bg = Image.new("RGB", (total_w, total_h), (255, 255, 255))
@@ -469,23 +467,19 @@ def make_layout_v4(img_xz, img_xy, img_yz, title: str, subtitle: str,
     draw.text((pad, pad // 2), title, fill=(0, 0, 0), font=font_title)
     draw.text((pad, pad // 2 + title_h - 8), subtitle, fill=(80, 80, 80), font=font_subtitle)
 
-    # 2. 三视图堆叠 + 居中
-    y = pad + title_h + subtitle_h + pad
+    # 2. 三视图横向 1x3 并排
+    y_views = pad + title_h + subtitle_h + pad
+    x = pad
     for img, label in views:
-        # 标签在图片上方居中
-        bbox = draw.textbbox((0, 0), label, font=font_label)
-        text_w = bbox[2] - bbox[0]
-        x = (total_w - text_w) // 2
-        draw.text((x, y), label, fill=(0, 0, 0), font=font_label)
-        y += label_h
-        # 图片水平居中
-        x = (total_w - img.width) // 2
-        bg.paste(img, (x, y))
-        y += img.height + pad
+        # 标签在图片上方, 左对齐 (老板原话"对齐" = 同一基线)
+        draw.text((x, y_views), label, fill=(0, 0, 0), font=font_label)
+        # 图片贴在标签下方
+        bg.paste(img, (x, y_views + label_h))
+        x += img.width + pad
 
     # 3. 底部材料列表
-    section_y = y
-    draw.text((pad, section_y), f"材料清单 ({len(stats)} 种方块)", fill=(0, 0, 0), font=font_section)
+    y = y_views + label_h + max(img.height for img, _ in views) + pad
+    draw.text((pad, y), f"材料清单 ({len(stats)} 种方块)", fill=(0, 0, 0), font=font_section)
     y += label_h + 4
 
     # 渲染每行 [贴图] 方块名 数量
@@ -509,16 +503,23 @@ def make_layout_v4(img_xz, img_xy, img_yz, title: str, subtitle: str,
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 a_render_v4.py input.litematic [out.png] [px=16] [layers=5]")
-        raise SystemExit(1)
-    path = Path(sys.argv[1])
-    out = Path(sys.argv[2]) if len(sys.argv) > 2 else path.with_suffix(".v4.png")
-    px = int(sys.argv[3]) if len(sys.argv) > 3 else 16
-    max_layers = int(sys.argv[4]) if len(sys.argv) > 4 else 5
+    import argparse
+    p = argparse.ArgumentParser(description="Litematic orthographic model renderer (V4)")
+    p.add_argument("input", help=".litematic file")
+    p.add_argument("out", nargs="?", default=None, help="output PNG (default: <input>.v4.png)")
+    p.add_argument("--px", type=int, default=32, help="pixels per block (default 32)")
+    p.add_argument("--layers", type=int, default=5, help="X-ray layers when mode=xray (default 5)")
+    p.add_argument("--mode", choices=["top", "xray"], default="top",
+                   help="top: only y=max_y for every view; xray: top N layers with 10%% fade (default top)")
+    args = p.parse_args()
+
+    path = Path(args.input)
+    out = Path(args.out) if args.out else path.with_suffix(".v4.png")
+    px = args.px
+    max_layers = args.layers if args.mode == "xray" else 1
     schematic = litemapy.Schematic.load(str(path))
     reg = next(iter(schematic.regions.values()))
-    print(f"=== {path.name}: {schematic.width}x{schematic.height}x{schematic.length} ===")
+    print(f"=== {path.name}: {schematic.width}x{schematic.height}x{schematic.length} mode={args.mode} layers={max_layers} ===")
     xz = render_projection(reg, "xz", px, max_layers)
     xy = render_projection(reg, "xy", px, max_layers)
     yz = render_projection(reg, "yz", px, max_layers)
@@ -529,10 +530,11 @@ def main():
                 block = reg[x, y, z]
                 if block and not v3.is_air(block.id):
                     counts[block.id] += 1
+    mode_label = f"Y={reg.maxy()} 顶层" if args.mode == "top" else f"X 射线 {max_layers} 层 (顶层向内)"
     result = make_layout_v4(
         xz, xy, yz,
         title=path.stem,
-        subtitle=f"{schematic.width} × {schematic.height} × {schematic.length}    X-ray {max_layers} layers    V4 model projection",
+        subtitle=f"{schematic.width} × {schematic.height} × {schematic.length}    {mode_label}    V4 model projection",
         stats=counts.most_common(),
     )
     result.save(out)
