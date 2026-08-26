@@ -5,7 +5,11 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.systems.VertexSorter;
+import org.joml.Matrix4f;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.client.MinecraftClient;
@@ -23,9 +27,23 @@ import net.minecraft.util.math.BlockPos;
 
 /** Minimal proof: populate a ClientWorld, let the normal WorldRenderer draw it, copy its framebuffer. */
 public final class OffscreenRenderer {
+    private static final float ORTHO_HALF_SIZE = 5.25f;
     private static Job job;
     private static boolean worldStartRequested;
-    static { ClientTickEvents.END_CLIENT_TICK.register(OffscreenRenderer::tick); }
+    private static View activeView;
+    static {
+        ClientTickEvents.END_CLIENT_TICK.register(OffscreenRenderer::tick);
+        WorldRenderEvents.START.register(context -> {
+            if (activeView == null || !activeView.orthographic) return;
+            MinecraftClient client = MinecraftClient.getInstance();
+            float aspect = (float) client.getWindow().getFramebufferWidth()
+                    / client.getWindow().getFramebufferHeight();
+            Matrix4f projection = context.projectionMatrix().setOrtho(
+                    -ORTHO_HALF_SIZE * aspect, ORTHO_HALF_SIZE * aspect,
+                    -ORTHO_HALF_SIZE, ORTHO_HALF_SIZE, 0.05f, 256.0f);
+            RenderSystem.setProjectionMatrix(projection, VertexSorter.BY_DISTANCE);
+        });
+    }
     private OffscreenRenderer() {}
 
     public static void arm(String input, String output) { job = new Job(Path.of(input), Path.of(output)); }
@@ -47,20 +65,23 @@ public final class OffscreenRenderer {
         try {
             if (!job.loaded) { job.load(client); return; }
             View view = View.values()[Math.min(job.view, View.values().length - 1)];
-            client.player.setPosition(view.x, view.y, view.z);
+            activeView = view;
+            client.player.setPosition(view.x, view.y - client.player.getStandingEyeHeight(), view.z);
             client.player.setYaw(view.yaw); client.player.setPitch(view.pitch);
             if (++job.wait < 35) return; // chunk rebuild + one fully rendered frame
             job.capture(client, view.name().toLowerCase());
             job.view++; job.wait = 0;
-            if (job.view == View.values().length) { System.out.println("LITEMATIC_RENDER_DONE " + job.out); client.scheduleStop(); job = null; worldStartRequested = false; }
-        } catch (Exception error) { error.printStackTrace(); client.scheduleStop(); job = null; }
+            if (job.view == View.values().length) { System.out.println("LITEMATIC_RENDER_DONE " + job.out); client.scheduleStop(); job = null; activeView = null; worldStartRequested = false; }
+        } catch (Exception error) { error.printStackTrace(); client.scheduleStop(); job = null; activeView = null; }
     }
 
     private enum View {
-        TOP(2.5, 124, -2.5, 0, 90), FRONT(2.5, 104, 30, 180, 0),
-        SIDE(30, 104, -2.5, 90, 0), ISO(24, 119, 20, 135, 28);
-        final double x,y,z; final float yaw,pitch;
-        View(double x,double y,double z,float yaw,float pitch) { this.x=x;this.y=y;this.z=z;this.yaw=yaw;this.pitch=pitch; }
+        TOP(2.5, 110, 2.5, 0, 90, true), FRONT(2.5, 104, 12, 180, 0, true),
+        SIDE(12, 104, 2.5, 90, 0, true), ISO(15, 110, 15, 135, 20, false);
+        final double x,y,z; final float yaw,pitch; final boolean orthographic;
+        View(double x,double y,double z,float yaw,float pitch,boolean orthographic) {
+            this.x=x;this.y=y;this.z=z;this.yaw=yaw;this.pitch=pitch;this.orthographic=orthographic;
+        }
     }
 
     private static final class Job {
@@ -91,7 +112,7 @@ public final class OffscreenRenderer {
                 BlockEntity be=BlockEntity.createFromNbt(p,client.world.getBlockState(p),tag,client.world.getRegistryManager());
                 if (be!=null) client.world.addBlockEntity(be);
             }
-            Files.createDirectories(out); client.options.hudHidden=true; client.options.getFov().setValue(30);
+            Files.createDirectories(out); client.options.hudHidden=true; client.options.getFov().setValue(50);
             client.worldRenderer.reload(); loaded=true;
             System.out.printf("Loaded %dx%dx%d palette=%d tiles=%d%n",sx,sy,sz,palette.size(),tiles.size());
         }
