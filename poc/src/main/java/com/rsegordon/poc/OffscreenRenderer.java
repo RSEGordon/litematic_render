@@ -82,11 +82,11 @@ public final class OffscreenRenderer {
             for (int y=0;y<sy;y++) for (int z=0;z<sz;z++) for (int x=0;x<sx;x++) {
                 int n=(y*sz+z)*sx+x, start=n*bits, word=start>>>6, shift=start&63;
                 long value=packed[word]>>>shift; if (shift+bits>64) value|=packed[word+1]<<(64-shift);
-                client.world.setBlockState(origin.add(x,y,-z), palette.get((int)(value&mask)), 19);
+                client.world.setBlockState(origin.add(x,y,z), palette.get((int)(value&mask)), 19);
             }
             NbtList tiles=region.getList("TileEntities", NbtElement.COMPOUND_TYPE);
             for (int i=0;i<tiles.size();i++) {
-                NbtCompound tag=tiles.getCompound(i).copy(); BlockPos p=origin.add(tag.getInt("x"),tag.getInt("y"),-tag.getInt("z"));
+                NbtCompound tag=tiles.getCompound(i).copy(); BlockPos p=origin.add(tag.getInt("x"),tag.getInt("y"),tag.getInt("z"));
                 tag.putInt("x",p.getX());tag.putInt("y",p.getY());tag.putInt("z",p.getZ());
                 BlockEntity be=BlockEntity.createFromNbt(p,client.world.getBlockState(p),tag,client.world.getRegistryManager());
                 if (be!=null) client.world.addBlockEntity(be);
