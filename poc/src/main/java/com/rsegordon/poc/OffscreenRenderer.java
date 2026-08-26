@@ -116,7 +116,8 @@ public final class OffscreenRenderer {
             if (regions.getKeys().isEmpty()) throw new IllegalArgumentException("No litematic regions");
             NbtCompound region = regions.getCompound(regions.getKeys().iterator().next());
             NbtCompound size = region.getCompound("Size");
-            int sx=Math.abs(size.getInt("x")), sy=Math.abs(size.getInt("y")), sz=Math.abs(size.getInt("z"));
+            int sizeX=size.getInt("x"),sizeY=size.getInt("y"),sizeZ=size.getInt("z");
+            int sx=Math.abs(sizeX),sy=Math.abs(sizeY),sz=Math.abs(sizeZ);
             minX=0; minY=100; minZ=0; maxX=sx; maxY=100+sy; maxZ=sz;
             NbtList paletteNbt = region.getList("BlockStatePalette", NbtElement.COMPOUND_TYPE);
             List<BlockState> palette = new ArrayList<>();
@@ -145,12 +146,25 @@ public final class OffscreenRenderer {
                 if (be!=null) client.world.addBlockEntity(be);
             }
             NbtList entities=region.getList("Entities", NbtElement.COMPOUND_TYPE);
+            Vec3d entityOrigin=new Vec3d(
+                    origin.getX()+(sizeX<0?sx-1:0),
+                    origin.getY()+(sizeY<0?sy-1:0),
+                    origin.getZ()+(sizeZ<0?sz-1:0));
             int entityCount=0;
             for (int i=0;i<entities.size();i++) {
+                final int entityIndex=i;
                 NbtCompound tag=entities.getCompound(i).copy();
+                NbtList nbtPos=tag.getList("Pos",NbtElement.DOUBLE_TYPE);
+                System.out.printf("Entity[%d] NBT Pos=[%.3f,%.3f,%.3f] normalizedOrigin=[%.1f,%.1f,%.1f]%n",
+                        entityIndex,nbtPos.getDouble(0),nbtPos.getDouble(1),nbtPos.getDouble(2),
+                        entityOrigin.x,entityOrigin.y,entityOrigin.z);
                 Entity rootEntity=EntityType.loadEntityWithPassengers(tag,client.world,entity -> {
                     entity.setUuid(UUID.randomUUID());
-                    entity.setPosition(entity.getX()+origin.getX(),entity.getY()+origin.getY(),entity.getZ()+origin.getZ());
+                    System.out.printf("Entity[%d] loaded Pos=[%.3f,%.3f,%.3f]%n",
+                            entityIndex,entity.getX(),entity.getY(),entity.getZ());
+                    entity.refreshPositionAfterTeleport(entity.getPos().add(entityOrigin));
+                    System.out.printf("Entity[%d] world Pos=[%.3f,%.3f,%.3f]%n",
+                            entityIndex,entity.getX(),entity.getY(),entity.getZ());
                     return entity;
                 });
                 if (rootEntity==null) continue;
