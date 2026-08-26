@@ -1,0 +1,8 @@
+{
+  "variants": {
+    "facing=north": {"model": "minecraft:block/trapped_chest", "y": 180},
+    "facing=east": {"model": "minecraft:block/trapped_chest", "y": 270},
+    "facing=south": {"model": "minecraft:block/trapped_chest"},
+    "facing=west": {"model": "minecraft:block/trapped_chest", "y": 90}
+  }
+}

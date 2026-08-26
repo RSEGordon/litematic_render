@@ -265,10 +265,13 @@ def render_model_face(block, view_face: str, px: int) -> Image.Image:
         "down": (0, -1, 0), "up": (0, 1, 0),
         "north": (0, 0, -1), "south": (0, 0, 1),
     }[view_face]
-    for element in model["elements"]:
+    logic_component = block.id in {"minecraft:repeater", "minecraft:comparator"}
+    for element_index, element in enumerate(model["elements"]):
         lo, hi = element.get("from", [0, 0, 0]), element.get("to", [16, 16, 16])
         element_rotation = element.get("rotation")
-        corners = [_rotate_point(_rotate_element((x, y, z), element_rotation, point=True), xr, yr)
+        element_xr = 0 if logic_component and element_index == 0 else xr
+        element_yr = 0 if logic_component and element_index == 0 else yr
+        corners = [_rotate_point(_rotate_element((x, y, z), element_rotation, point=True), element_xr, element_yr)
                    for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])]
         rect = _project_box(corners, view_face)
         for model_face, face_def in element.get("faces", {}).items():
@@ -278,7 +281,7 @@ def render_model_face(block, view_face: str, px: int) -> Image.Image:
                 "north": (0, 0, -1), "south": (0, 0, 1),
             }[model_face]
             normal = _rotate_element(normal, element_rotation, point=False)
-            normal = _rotate_vector(normal, xr, yr)
+            normal = _rotate_vector(normal, element_xr, element_yr)
             if sum(a * b for a, b in zip(normal, view_normal)) <= 1e-6:
                 continue
             tex_name = _texture_name(face_def, model["textures"])
@@ -296,7 +299,8 @@ def render_model_face(block, view_face: str, px: int) -> Image.Image:
         right, bottom = max(right, left + 1), max(bottom, top + 1)
         texture = _crop_uv(v3.load_texture_rgba(tex_name), face_def)
         if not locally_rotated:
-            texture = _orient_variant_uv(texture, model_face, view_face, xr, yr)
+            texture = _orient_variant_uv(texture, model_face, view_face,
+                                         element_xr, element_yr)
         texture = texture.resize((right - left, bottom - top), Image.Resampling.NEAREST)
         cell.alpha_composite(texture, (left, top))
     return cell
