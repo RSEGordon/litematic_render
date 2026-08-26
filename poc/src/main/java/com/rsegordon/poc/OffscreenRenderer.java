@@ -9,6 +9,7 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.TitleScreen;
 import net.minecraft.client.texture.NativeImage;
 import net.minecraft.client.util.ScreenshotRecorder;
 import net.minecraft.nbt.NbtCompound;
@@ -23,13 +24,26 @@ import net.minecraft.util.math.BlockPos;
 /** Minimal proof: populate a ClientWorld, let the normal WorldRenderer draw it, copy its framebuffer. */
 public final class OffscreenRenderer {
     private static Job job;
+    private static boolean worldStartRequested;
     static { ClientTickEvents.END_CLIENT_TICK.register(OffscreenRenderer::tick); }
     private OffscreenRenderer() {}
 
     public static void arm(String input, String output) { job = new Job(Path.of(input), Path.of(output)); }
 
     private static void tick(MinecraftClient client) {
-        if (job == null || client.world == null || client.player == null) return;
+        if (job == null) return;
+        if (client.world == null) {
+            // Starting an integrated server while the resource reload overlay is active deadlocks
+            // MinecraftClient.startIntegratedServer(), which waits for that overlay to disappear.
+            if (client.getOverlay() != null) return;
+            if (!worldStartRequested) {
+                worldStartRequested = true;
+                System.out.println("LITEMATIC_RENDER_STARTING_WORLD World");
+                client.createIntegratedServerLoader().start("World", () -> client.setScreen(new TitleScreen()));
+            }
+            return;
+        }
+        if (client.player == null) return;
         try {
             if (!job.loaded) { job.load(client); return; }
             View view = View.values()[Math.min(job.view, View.values().length - 1)];
@@ -38,7 +52,7 @@ public final class OffscreenRenderer {
             if (++job.wait < 35) return; // chunk rebuild + one fully rendered frame
             job.capture(client, view.name().toLowerCase());
             job.view++; job.wait = 0;
-            if (job.view == View.values().length) { System.out.println("LITEMATIC_RENDER_DONE " + job.out); client.scheduleStop(); job = null; }
+            if (job.view == View.values().length) { System.out.println("LITEMATIC_RENDER_DONE " + job.out); client.scheduleStop(); job = null; worldStartRequested = false; }
         } catch (Exception error) { error.printStackTrace(); client.scheduleStop(); job = null; }
     }
 
@@ -77,7 +91,7 @@ public final class OffscreenRenderer {
                 BlockEntity be=BlockEntity.createFromNbt(p,client.world.getBlockState(p),tag,client.world.getRegistryManager());
                 if (be!=null) client.world.addBlockEntity(be);
             }
-            Files.createDirectories(out); client.options.hudHidden=true; client.options.getFov().setValue(18);
+            Files.createDirectories(out); client.options.hudHidden=true; client.options.getFov().setValue(30);
             client.worldRenderer.reload(); loaded=true;
             System.out.printf("Loaded %dx%dx%d palette=%d tiles=%d%n",sx,sy,sz,palette.size(),tiles.size());
         }
