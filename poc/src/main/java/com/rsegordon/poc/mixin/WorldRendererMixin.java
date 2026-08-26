@@ -11,14 +11,16 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import com.rsegordon.poc.BackgroundPass;
 
 @Mixin(WorldRenderer.class)
 public abstract class WorldRendererMixin {
     @Inject(method = "renderSky", at = @At("HEAD"), cancellable = true)
-    private void litematicRender$whiteSky(
+    private void litematicRender$transparentSky(
             Matrix4f positionMatrix, Matrix4f projectionMatrix, float tickDelta,
             Camera camera, boolean thickFog, Runnable fogCallback, CallbackInfo ci) {
-        RenderSystem.clearColor(1.0f, 1.0f, 1.0f, 1.0f);
+        float background = BackgroundPass.isWhite() ? 1.0f : 0.0f;
+        RenderSystem.clearColor(background, background, background, 0.0f);
         RenderSystem.clear(GL11.GL_COLOR_BUFFER_BIT, MinecraftClient.IS_SYSTEM_MAC);
         ci.cancel();
     }

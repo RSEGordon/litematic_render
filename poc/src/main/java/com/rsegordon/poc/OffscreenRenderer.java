@@ -4,6 +4,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.systems.VertexSorter;
@@ -17,6 +18,8 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.TitleScreen;
 import net.minecraft.client.texture.NativeImage;
 import net.minecraft.client.util.ScreenshotRecorder;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.EntityType;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.nbt.NbtElement;
 import net.minecraft.nbt.NbtHelper;
@@ -25,23 +28,24 @@ import net.minecraft.nbt.NbtList;
 import net.minecraft.nbt.NbtSizeTracker;
 import net.minecraft.registry.Registries;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Vec3d;
 
 /** Minimal proof: populate a ClientWorld, let the normal WorldRenderer draw it, copy its framebuffer. */
 public final class OffscreenRenderer {
-    private static final float ORTHO_HALF_SIZE = 5.25f;
     private static Job job;
     private static boolean worldStartRequested;
-    private static View activeView;
+    private static ViewState activeView;
     static {
         ClientTickEvents.END_CLIENT_TICK.register(OffscreenRenderer::tick);
         WorldRenderEvents.START.register(context -> {
-            if (activeView == null || !activeView.orthographic) return;
+            if (activeView == null) return;
             MinecraftClient client = MinecraftClient.getInstance();
             float aspect = (float) client.getWindow().getFramebufferWidth()
                     / client.getWindow().getFramebufferHeight();
             Matrix4f projection = context.projectionMatrix().setOrtho(
-                    -ORTHO_HALF_SIZE * aspect, ORTHO_HALF_SIZE * aspect,
-                    -ORTHO_HALF_SIZE, ORTHO_HALF_SIZE, 0.05f, 256.0f);
+                    -activeView.halfSize * aspect, activeView.halfSize * aspect,
+                    -activeView.halfSize, activeView.halfSize, 0.05f, activeView.farPlane);
             RenderSystem.setProjectionMatrix(projection, VertexSorter.BY_DISTANCE);
         });
     }
@@ -65,12 +69,23 @@ public final class OffscreenRenderer {
         if (client.player == null) return;
         try {
             if (!job.loaded) { job.load(client); return; }
+            job.freezeEntities();
             View view = View.values()[Math.min(job.view, View.values().length - 1)];
-            activeView = view;
-            client.player.setPosition(view.x, view.y - client.player.getStandingEyeHeight(), view.z);
+            activeView = job.cameraFor(view, client);
+            client.player.setPosition(activeView.position.x,
+                    activeView.position.y - client.player.getStandingEyeHeight(), activeView.position.z);
             client.player.setYaw(view.yaw); client.player.setPitch(view.pitch);
-            if (++job.wait < 35) return; // chunk rebuild + one fully rendered frame
+            job.wait++;
+            if (job.blackPass == null) {
+                if (job.wait < 35) return; // chunk rebuild + one fully rendered frame
+                job.blackPass=ScreenshotRecorder.takeScreenshot(client.getFramebuffer());
+                BackgroundPass.setWhite(true);
+                job.wait=0;
+                return;
+            }
+            if (job.wait < 5) return;
             job.capture(client, view.name().toLowerCase());
+            BackgroundPass.setWhite(false);
             job.view++; job.wait = 0;
             if (job.view == View.values().length) { System.out.println("LITEMATIC_RENDER_DONE " + job.out); client.scheduleStop(); job = null; activeView = null; worldStartRequested = false; }
         } catch (Exception error) { error.printStackTrace(); client.scheduleStop(); job = null; activeView = null; }
@@ -82,16 +97,17 @@ public final class OffscreenRenderer {
         // TOP/FRONT/SIDE are the canonical 3-view orthographic. ISO uses the
         // same ortho but with the camera rotated 45° yaw / 30° pitch so it
         // reads as a single axonometric view next to the cardinal views.
-        TOP(2.5, 110, 2.5, 0, 90, true), FRONT(2.5, 104, 12, 180, 0, true),
-        SIDE(12, 104, 2.5, 90, 0, true), ISO(15, 110, 15, 135, 30, true);
-        final double x,y,z; final float yaw,pitch; final boolean orthographic;
-        View(double x,double y,double z,float yaw,float pitch,boolean orthographic) {
-            this.x=x;this.y=y;this.z=z;this.yaw=yaw;this.pitch=pitch;this.orthographic=orthographic;
-        }
+        TOP(0, 90), FRONT(180, 0), SIDE(90, 0), ISO(135, 30);
+        final float yaw,pitch;
+        View(float yaw,float pitch) { this.yaw=yaw;this.pitch=pitch; }
     }
 
+    private record ViewState(Vec3d position, float halfSize, float farPlane) {}
+
     private static final class Job {
-        final Path input, out; boolean loaded; int wait, view;
+        final Path input, out; boolean loaded; int wait, view; NativeImage blackPass;
+        double minX, minY, minZ, maxX, maxY, maxZ;
+        final List<FrozenEntity> frozenEntities=new ArrayList<>();
         Job(Path input, Path out) { this.input=input; this.out=out; }
 
         void load(MinecraftClient client) throws Exception {
@@ -101,6 +117,7 @@ public final class OffscreenRenderer {
             NbtCompound region = regions.getCompound(regions.getKeys().iterator().next());
             NbtCompound size = region.getCompound("Size");
             int sx=Math.abs(size.getInt("x")), sy=Math.abs(size.getInt("y")), sz=Math.abs(size.getInt("z"));
+            minX=0; minY=100; minZ=0; maxX=sx; maxY=100+sy; maxZ=sz;
             NbtList paletteNbt = region.getList("BlockStatePalette", NbtElement.COMPOUND_TYPE);
             List<BlockState> palette = new ArrayList<>();
             for (int i=0;i<paletteNbt.size();i++) palette.add(NbtHelper.toBlockState(Registries.BLOCK.getReadOnlyWrapper(), paletteNbt.getCompound(i)));
@@ -127,15 +144,94 @@ public final class OffscreenRenderer {
                 BlockEntity be=BlockEntity.createFromNbt(p,client.world.getBlockState(p),tag,client.world.getRegistryManager());
                 if (be!=null) client.world.addBlockEntity(be);
             }
+            NbtList entities=region.getList("Entities", NbtElement.COMPOUND_TYPE);
+            int entityCount=0;
+            for (int i=0;i<entities.size();i++) {
+                NbtCompound tag=entities.getCompound(i).copy();
+                Entity rootEntity=EntityType.loadEntityWithPassengers(tag,client.world,entity -> {
+                    entity.setUuid(UUID.randomUUID());
+                    entity.setPosition(entity.getX()+origin.getX(),entity.getY()+origin.getY(),entity.getZ()+origin.getZ());
+                    return entity;
+                });
+                if (rootEntity==null) continue;
+                for (Entity entity : rootEntity.streamSelfAndPassengers().toList()) {
+                    entity.setVelocity(Vec3d.ZERO);
+                    entity.setNoGravity(true);
+                    client.world.addEntity(entity);
+                    include(entity.getBoundingBox());
+                    frozenEntities.add(new FrozenEntity(entity,entity.getPos()));
+                    entityCount++;
+                }
+            }
             Files.createDirectories(out); client.options.hudHidden=true; client.options.getFov().setValue(50);
             client.worldRenderer.reload(); loaded=true;
-            System.out.printf("Loaded %dx%dx%d palette=%d tiles=%d%n",sx,sy,sz,palette.size(),tiles.size());
+            System.out.printf("Loaded %dx%dx%d palette=%d tiles=%d entities=%d bounds=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]%n",
+                    sx,sy,sz,palette.size(),tiles.size(),entityCount,minX,minY,minZ,maxX,maxY,maxZ);
+        }
+
+        void include(Box box) {
+            minX=Math.min(minX,box.minX); minY=Math.min(minY,box.minY); minZ=Math.min(minZ,box.minZ);
+            maxX=Math.max(maxX,box.maxX); maxY=Math.max(maxY,box.maxY); maxZ=Math.max(maxZ,box.maxZ);
+        }
+
+        void freezeEntities() {
+            for (FrozenEntity frozen : frozenEntities) {
+                frozen.entity.setVelocity(Vec3d.ZERO);
+                frozen.entity.refreshPositionAfterTeleport(frozen.position);
+            }
+        }
+
+        ViewState cameraFor(View view, MinecraftClient client) {
+            Vec3d center=new Vec3d((minX+maxX)/2.0,(minY+maxY)/2.0,(minZ+maxZ)/2.0);
+            double yaw=Math.toRadians(view.yaw), pitch=Math.toRadians(view.pitch);
+            Vec3d forward=new Vec3d(-Math.sin(yaw)*Math.cos(pitch),-Math.sin(pitch),Math.cos(yaw)*Math.cos(pitch));
+            Vec3d right=new Vec3d(Math.cos(yaw),0,Math.sin(yaw)).normalize();
+            Vec3d up=forward.crossProduct(right).normalize();
+            double horizontal=0, vertical=0, radius=0;
+            for (double x : new double[]{minX,maxX}) for (double y : new double[]{minY,maxY})
+                for (double z : new double[]{minZ,maxZ}) {
+                    Vec3d delta=new Vec3d(x,y,z).subtract(center);
+                    horizontal=Math.max(horizontal,Math.abs(delta.dotProduct(right)));
+                    vertical=Math.max(vertical,Math.abs(delta.dotProduct(up)));
+                    radius=Math.max(radius,delta.length());
+                }
+            float aspect=(float)client.getWindow().getFramebufferWidth()/client.getWindow().getFramebufferHeight();
+            float halfSize=(float)(Math.max(vertical,horizontal/aspect)*1.2);
+            halfSize=Math.max(halfSize,1.0f);
+            double distance=radius+Math.max(8.0,halfSize*1.2);
+            Vec3d position=center.subtract(forward.multiply(distance));
+            float farPlane=(float)Math.max(256.0,distance+radius+32.0);
+            return new ViewState(position,halfSize,farPlane);
         }
 
         void capture(MinecraftClient client,String name) throws Exception {
             Path file=out.resolve("mcoo_"+name+".png");
-            try (NativeImage image=ScreenshotRecorder.takeScreenshot(client.getFramebuffer())) { image.writeTo(file); }
+            try (NativeImage whitePass=ScreenshotRecorder.takeScreenshot(client.getFramebuffer());
+                    NativeImage image=matte(blackPass,whitePass)) {
+                image.writeTo(file);
+            } finally {
+                blackPass.close();
+                blackPass=null;
+            }
             System.out.println("WROTE " + file);
         }
+
+        NativeImage matte(NativeImage black, NativeImage white) {
+            int width=black.getWidth(), height=black.getHeight();
+            NativeImage result=new NativeImage(NativeImage.Format.RGBA,width,height,false);
+            for (int y=0;y<height;y++) for (int x=0;x<width;x++) {
+                int br=black.getRed(x,y)&255, bg=black.getGreen(x,y)&255, bb=black.getBlue(x,y)&255;
+                int wr=white.getRed(x,y)&255, wg=white.getGreen(x,y)&255, wb=white.getBlue(x,y)&255;
+                int transparency=Math.max(0,Math.min(255,Math.max(wr-br,Math.max(wg-bg,wb-bb))));
+                int alpha=255-transparency;
+                int red=alpha==0?0:Math.min(255,(br*255+alpha/2)/alpha);
+                int green=alpha==0?0:Math.min(255,(bg*255+alpha/2)/alpha);
+                int blue=alpha==0?0:Math.min(255,(bb*255+alpha/2)/alpha);
+                result.setColor(x,y,(alpha<<24)|(blue<<16)|(green<<8)|red);
+            }
+            return result;
+        }
     }
+
+    private record FrozenEntity(Entity entity, Vec3d position) {}
 }
