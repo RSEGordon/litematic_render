@@ -11,6 +11,7 @@ import org.joml.Matrix4f;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.TitleScreen;
@@ -100,6 +101,15 @@ public final class OffscreenRenderer {
             for (int i=0;i<paletteNbt.size();i++) palette.add(NbtHelper.toBlockState(Registries.BLOCK.getReadOnlyWrapper(), paletteNbt.getCompound(i)));
             long[] packed=region.getLongArray("BlockStates"); int bits=Math.max(2, 32-Integer.numberOfLeadingZeros(palette.size()-1)); long mask=(1L<<bits)-1;
             BlockPos origin=new BlockPos(0,100,0);
+            // The vanilla the_void flat preset deliberately adds a stone spawn platform.
+            // Remove only the preset terrain below the model so orthographic top renders
+            // contain the litematic and the white background, not the spawn platform.
+            BlockState air = Blocks.AIR.getDefaultState();
+            for (int y=client.world.getBottomY();y<origin.getY();y++) {
+                for (int z=-32;z<=32;z++) for (int x=-32;x<=32;x++) {
+                    client.world.setBlockState(new BlockPos(x,y,z),air,19);
+                }
+            }
             for (int y=0;y<sy;y++) for (int z=0;z<sz;z++) for (int x=0;x<sx;x++) {
                 int n=(y*sz+z)*sx+x, start=n*bits, word=start>>>6, shift=start&63;
                 long value=packed[word]>>>shift; if (shift+bits>64) value|=packed[word+1]<<(64-shift);

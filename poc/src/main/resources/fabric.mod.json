@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "litematic_render_poc",
+  "version": "${version}",
+  "name": "Litematic Render PoC",
+  "environment": "client",
+  "entrypoints": { "client": ["com.rsegordon.poc.LitematicRenderMod"] },
+  "mixins": ["litematic_render_poc.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.16.9",
+    "minecraft": "~1.21.1",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
