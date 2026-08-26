@@ -259,7 +259,12 @@ public final class OffscreenRenderer {
                 int red=alpha==0?0:Math.min(255,(br*255+alpha/2)/alpha);
                 int green=alpha==0?0:Math.min(255,(bg*255+alpha/2)/alpha);
                 int blue=alpha==0?0:Math.min(255,(bb*255+alpha/2)/alpha);
-                result.setColor(x,y,(alpha<<24)|(blue<<16)|(green<<8)|red);
+                // NativeImage.setColor expects little-endian RGBA: alpha at
+                // bits 24..31, red at 16..23, green at 8..15, blue at 0..7.
+                // Earlier code had blue and red swapped, producing cyan-tinted
+                // pixels where the alpha matting passed values through wrong
+                // channels.
+                result.setColor(x,y,(alpha<<24)|(red<<16)|(green<<8)|blue);
             }
             return result;
         }
