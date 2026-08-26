@@ -77,8 +77,13 @@ public final class OffscreenRenderer {
     }
 
     private enum View {
+        // All four views use orthographic projection so iso is a flat technical
+        // drawing without perspective distortion (matches engineering style).
+        // TOP/FRONT/SIDE are the canonical 3-view orthographic. ISO uses the
+        // same ortho but with the camera rotated 45° yaw / 30° pitch so it
+        // reads as a single axonometric view next to the cardinal views.
         TOP(2.5, 110, 2.5, 0, 90, true), FRONT(2.5, 104, 12, 180, 0, true),
-        SIDE(12, 104, 2.5, 90, 0, true), ISO(15, 110, 15, 135, 20, false);
+        SIDE(12, 104, 2.5, 90, 0, true), ISO(15, 110, 15, 135, 30, true);
         final double x,y,z; final float yaw,pitch; final boolean orthographic;
         View(double x,double y,double z,float yaw,float pitch,boolean orthographic) {
             this.x=x;this.y=y;this.z=z;this.yaw=yaw;this.pitch=pitch;this.orthographic=orthographic;
