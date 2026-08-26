@@ -297,14 +297,14 @@ public final class OffscreenRenderer {
         }
 
         private static BufferedImage nativeToBuffered(NativeImage ni) {
+            // NativeImage in MC 1.21.1 is top-left origin (same as BufferedImage),
+            // so we copy pixel-for-pixel without Y flip. The earlier code flipped
+            // Y which produced upside-down composites.
             int w = ni.getWidth(), h = ni.getHeight();
             BufferedImage bi = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
-            // NativeImage is bottom-left origin (OpenGL) -> BufferedImage is
-            // top-left origin. Flip Y while reading.
             for (int y = 0; y < h; y++) {
-                int srcY = h - 1 - y;
                 for (int x = 0; x < w; x++) {
-                    int c = ni.getColor(x, srcY);
+                    int c = ni.getColor(x, y);
                     bi.setRGB(x, y, c);
                 }
             }
