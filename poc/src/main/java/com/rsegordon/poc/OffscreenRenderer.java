@@ -1,5 +1,6 @@
 package com.rsegordon.poc;
 
+import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -30,6 +31,8 @@ import net.minecraft.registry.Registries;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
 
 /** Minimal proof: populate a ClientWorld, let the normal WorldRenderer draw it, copy its framebuffer. */
 public final class OffscreenRenderer {
@@ -56,8 +59,6 @@ public final class OffscreenRenderer {
     private static void tick(MinecraftClient client) {
         if (job == null) return;
         if (client.world == null) {
-            // Starting an integrated server while the resource reload overlay is active deadlocks
-            // MinecraftClient.startIntegratedServer(), which waits for that overlay to disappear.
             if (client.getOverlay() != null) return;
             if (!worldStartRequested) {
                 worldStartRequested = true;
@@ -77,27 +78,33 @@ public final class OffscreenRenderer {
             client.player.setYaw(view.yaw); client.player.setPitch(view.pitch);
             job.wait++;
             if (job.blackPass == null) {
-                if (job.wait < 35) return; // chunk rebuild + one fully rendered frame
+                if (job.wait < 35) return;
                 job.blackPass=ScreenshotRecorder.takeScreenshot(client.getFramebuffer());
                 BackgroundPass.setWhite(true);
                 job.wait=0;
                 return;
             }
             if (job.wait < 5) return;
-            job.capture(client, view.name().toLowerCase());
+            job.capture(client, view);
             BackgroundPass.setWhite(false);
             job.view++; job.wait = 0;
-            if (job.view == View.values().length) { System.out.println("LITEMATIC_RENDER_DONE " + job.out); client.scheduleStop(); job = null; activeView = null; worldStartRequested = false; }
+            if (job.view == View.values().length) {
+                job.assembleComposites();
+                System.out.println("LITEMATIC_RENDER_DONE " + job.out);
+                client.scheduleStop(); job = null; activeView = null; worldStartRequested = false;
+            }
         } catch (Exception error) { error.printStackTrace(); client.scheduleStop(); job = null; activeView = null; }
     }
 
+    /** 7 views for V64:
+     *  - TOP/FRONT/SIDE: cardinal 3-view orthographic
+     *  - ISO_135: standard iso at yaw=135 pitch=30
+     *  - ANGLE_45/225/315: 3 more axonometric views at yaw 45/225/315 pitch=30
+     *    so the 4-angle strip shows the model from 4 cardinal iso corners
+     */
     private enum View {
-        // All four views use orthographic projection so iso is a flat technical
-        // drawing without perspective distortion (matches engineering style).
-        // TOP/FRONT/SIDE are the canonical 3-view orthographic. ISO uses the
-        // same ortho but with the camera rotated 45° yaw / 30° pitch so it
-        // reads as a single axonometric view next to the cardinal views.
-        TOP(0, 90), FRONT(180, 0), SIDE(90, 0), ISO(135, 30);
+        TOP(0, 90), FRONT(180, 0), SIDE(90, 0),
+        ISO_135(135, 30), ANGLE_45(45, 30), ANGLE_225(225, 30), ANGLE_315(315, 30);
         final float yaw,pitch;
         View(float yaw,float pitch) { this.yaw=yaw;this.pitch=pitch; }
     }
@@ -108,6 +115,8 @@ public final class OffscreenRenderer {
         final Path input, out; boolean loaded; int wait, view; NativeImage blackPass;
         double minX, minY, minZ, maxX, maxY, maxZ;
         final List<FrozenEntity> frozenEntities=new ArrayList<>();
+        // Per-view saved native image (post alpha matting) for composite assembly
+        final NativeImage[] composites = new NativeImage[View.values().length];
         Job(Path input, Path out) { this.input=input; this.out=out; }
 
         void load(MinecraftClient client) throws Exception {
@@ -124,9 +133,6 @@ public final class OffscreenRenderer {
             for (int i=0;i<paletteNbt.size();i++) palette.add(NbtHelper.toBlockState(Registries.BLOCK.getReadOnlyWrapper(), paletteNbt.getCompound(i)));
             long[] packed=region.getLongArray("BlockStates"); int bits=Math.max(2, 32-Integer.numberOfLeadingZeros(palette.size()-1)); long mask=(1L<<bits)-1;
             BlockPos origin=new BlockPos(0,100,0);
-            // The vanilla the_void flat preset deliberately adds a stone spawn platform.
-            // Remove only the preset terrain below the model so orthographic top renders
-            // contain the litematic and the white background, not the spawn platform.
             BlockState air = Blocks.AIR.getDefaultState();
             for (int y=client.world.getBottomY();y<origin.getY();y++) {
                 for (int z=-32;z<=32;z++) for (int x=-32;x<=32;x++) {
@@ -155,16 +161,9 @@ public final class OffscreenRenderer {
                 final int entityIndex=i;
                 NbtCompound tag=entities.getCompound(i).copy();
                 NbtList nbtPos=tag.getList("Pos",NbtElement.DOUBLE_TYPE);
-                System.out.printf("Entity[%d] NBT Pos=[%.3f,%.3f,%.3f] normalizedOrigin=[%.1f,%.1f,%.1f]%n",
-                        entityIndex,nbtPos.getDouble(0),nbtPos.getDouble(1),nbtPos.getDouble(2),
-                        entityOrigin.x,entityOrigin.y,entityOrigin.z);
                 Entity rootEntity=EntityType.loadEntityWithPassengers(tag,client.world,entity -> {
                     entity.setUuid(UUID.randomUUID());
-                    System.out.printf("Entity[%d] loaded Pos=[%.3f,%.3f,%.3f]%n",
-                            entityIndex,entity.getX(),entity.getY(),entity.getZ());
                     entity.refreshPositionAfterTeleport(entity.getPos().add(entityOrigin));
-                    System.out.printf("Entity[%d] world Pos=[%.3f,%.3f,%.3f]%n",
-                            entityIndex,entity.getX(),entity.getY(),entity.getZ());
                     return entity;
                 });
                 if (rootEntity==null) continue;
@@ -218,17 +217,36 @@ public final class OffscreenRenderer {
             return new ViewState(position,halfSize,farPlane);
         }
 
-        void capture(MinecraftClient client,String name) throws Exception {
-            Path file=out.resolve("mcoo_"+name+".png");
-            try (NativeImage whitePass=ScreenshotRecorder.takeScreenshot(client.getFramebuffer());
-                    NativeImage image=matte(blackPass,whitePass)) {
-                image.writeTo(file);
+        void capture(MinecraftClient client, View view) throws Exception {
+            // We capture the white-background pass second; the black-background
+            // pass was captured at the start of this view. matte(black, white)
+            // derives per-pixel transparency from the difference between the two
+            // opaque reads.
+            // Keep the black framebuffer alive in blackPassBackup until matte
+            // has consumed it, then close both.
+            blackPassBackup = blackPass;
+            blackPass = null;
+            NativeImage whitePass;
+            try {
+                whitePass = ScreenshotRecorder.takeScreenshot(client.getFramebuffer());
             } finally {
-                blackPass.close();
-                blackPass=null;
+                // We close the backup AFTER matte() uses it.
             }
+            NativeImage image = matte(blackPassBackup, whitePass);
+            composites[view.ordinal()] = image;
+            // Also write the individual view as a standalone PNG.
+            Path file = out.resolve("mcoo_" + view.name().toLowerCase() + ".png");
+            image.writeTo(file);
             System.out.println("WROTE " + file);
+            // Close both framebuffer reads now that matte has consumed them.
+            blackPassBackup.close();
+            whitePass.close();
+            blackPassBackup = null;
+            // Reset for next view: capture a new black pass on next tick.
+            BackgroundPass.setWhite(false);
         }
+
+        private NativeImage blackPassBackup;
 
         NativeImage matte(NativeImage black, NativeImage white) {
             int width=black.getWidth(), height=black.getHeight();
@@ -244,6 +262,53 @@ public final class OffscreenRenderer {
                 result.setColor(x,y,(alpha<<24)|(blue<<16)|(green<<8)|red);
             }
             return result;
+        }
+
+        /** Build the two composites and write them out. */
+        void assembleComposites() throws Exception {
+            // Composite A: three-view ortho (TOP / FRONT / SIDE)
+            compositeStrip(new View[]{View.TOP, View.FRONT, View.SIDE},
+                    "mcoo_3view.png");
+            // Composite B: four-angle ortho strip (45/135/225/315)
+            compositeStrip(new View[]{View.ANGLE_45, View.ISO_135, View.ANGLE_225, View.ANGLE_315},
+                    "mcoo_4angle.png");
+        }
+
+        private void compositeStrip(View[] views, String outName) throws Exception {
+            int vw = composites[views[0].ordinal()].getWidth();
+            int vh = composites[views[0].ordinal()].getHeight();
+            int targetH = 1024;          // final strip height
+            int targetW = (int)Math.round(vw * (targetH / (double)vh));
+            int totalW = targetW * views.length;
+            java.awt.image.BufferedImage canvas = new java.awt.image.BufferedImage(
+                    totalW, targetH, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+            java.awt.Graphics2D g = canvas.createGraphics();
+            g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+                    java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            for (int i = 0; i < views.length; i++) {
+                NativeImage ni = composites[views[i].ordinal()];
+                BufferedImage src = nativeToBuffered(ni);
+                g.drawImage(src, i * targetW, 0, targetW, targetH, null);
+            }
+            g.dispose();
+            Path file = out.resolve(outName);
+            ImageIO.write(canvas, "PNG", file.toFile());
+            System.out.println("WROTE COMPOSITE " + file + " (" + totalW + "x" + targetH + ")");
+        }
+
+        private static BufferedImage nativeToBuffered(NativeImage ni) {
+            int w = ni.getWidth(), h = ni.getHeight();
+            BufferedImage bi = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+            // NativeImage is bottom-left origin (OpenGL) -> BufferedImage is
+            // top-left origin. Flip Y while reading.
+            for (int y = 0; y < h; y++) {
+                int srcY = h - 1 - y;
+                for (int x = 0; x < w; x++) {
+                    int c = ni.getColor(x, srcY);
+                    bi.setRGB(x, y, c);
+                }
+            }
+            return bi;
         }
     }
 
