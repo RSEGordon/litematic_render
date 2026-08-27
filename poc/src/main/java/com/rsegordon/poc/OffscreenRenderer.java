@@ -15,6 +15,7 @@ import com.mojang.blaze3d.platform.NativeImage;
 import org.joml.Matrix4f;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.client.Screenshot;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
@@ -41,6 +42,7 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.GameType;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.clock.ClockNetworkState;
 import net.minecraft.world.clock.WorldClock;
@@ -108,11 +110,20 @@ public final class OffscreenRenderer {
         }
         if (client.player == null) return;
         try {
+            if (client.player.isDeadOrDying()) {
+                if (!job.respawnRequested) {
+                    job.respawnRequested = true;
+                    client.player.respawn();
+                    System.out.println("[STEP 1] persisted dead player: respawn requested");
+                }
+                return;
+            }
+            if (!job.playerSecured) job.securePlayer(client);
             // The player object appears before the initial client chunks have
             // arrived. Writing into missing chunks silently fails and leaves
             // block entities attached to void_air, so wait for the 32-chunk
             // view-distance update and initial chunk packets to settle.
-            if (!job.loaded && worldSettleTicks++ < 60) return;
+            if (!job.loaded && worldSettleTicks++ < 200) return;
             if (!job.loaded) { job.load(client); return; }
             job.enforceCaptureTime(client);
             job.freezeEntities();
@@ -202,7 +213,7 @@ public final class OffscreenRenderer {
     private static final class Job {
         final Path input, out; final Style style; final long renderTime, jobStarted;
         final double blueprintNightVision, blueprintGamma;
-        boolean loaded, screenshotPending, nightVisionApplied, passRebuildPending;
+        boolean loaded, respawnRequested, playerSecured, screenshotPending, nightVisionApplied, passRebuildPending;
         boolean materialCapture;
         int materialCapturePhase, materialWait, writtenSingleViews;
         long passStarted, viewStarted, materialStarted;
@@ -228,6 +239,45 @@ public final class OffscreenRenderer {
             this.blueprintNightVision=unitDoubleProperty("litematic.render.nightvision", 1.0);
             this.blueprintGamma=positiveDoubleProperty("litematic.render.gamma", 2.5);
             this.capturePass=style.writesPaper() ? CapturePass.PAPER_COLOR : CapturePass.BLUEPRINT_EDGE;
+        }
+
+        /**
+         * Protect both sides of the integrated-server player before waiting for
+         * chunks or placing any litematic blocks. Client-only health/position
+         * changes are overwritten by the server and can still leave a death
+         * screen over every framebuffer capture.
+         */
+        void securePlayer(Minecraft client) {
+            client.player.setInvulnerable(true);
+            client.player.setHealth(20.0f);
+            client.player.getFoodData().setFoodLevel(20);
+            client.player.getFoodData().setSaturation(20.0f);
+            client.player.getAbilities().mayfly = true;
+            client.player.getAbilities().flying = true;
+            client.player.resetFallDistance();
+            client.player.removeAllEffects();
+
+            IntegratedServer server = client.getSingleplayerServer();
+            if (server == null) throw new IllegalStateException("Render world has no integrated server");
+            UUID playerId = client.player.getUUID();
+            server.execute(() -> {
+                var serverPlayer = server.getPlayerList().getPlayer(playerId);
+                if (serverPlayer == null) return;
+                serverPlayer.setGameMode(GameType.CREATIVE);
+                serverPlayer.setInvulnerable(true);
+                serverPlayer.setHealth(20.0f);
+                serverPlayer.getFoodData().setFoodLevel(20);
+                serverPlayer.getFoodData().setSaturation(20.0f);
+                serverPlayer.getAbilities().mayfly = true;
+                serverPlayer.getAbilities().flying = true;
+                serverPlayer.resetFallDistance();
+                serverPlayer.removeAllEffects();
+                serverPlayer.onUpdateAbilities();
+            });
+            playerSecured = true;
+            System.out.printf("[STEP 1] secure player%n  - gamemode: creative%n"
+                    + "  - invulnerable: true%n  - flying: true%n  - health: 20%n  - food: 20%n"
+                    + "  - effects: cleared%n");
         }
 
         void load(Minecraft client) throws Exception {
@@ -309,7 +359,6 @@ public final class OffscreenRenderer {
                     entity.setDeltaMovement(Vec3.ZERO);
                     entity.setNoGravity(true);
                     client.level.addEntity(entity);
-                    include(entity.getBoundingBox());
                     frozenEntities.add(new FrozenEntity(entity,entity.position()));
                     entityCount++;
                 }
