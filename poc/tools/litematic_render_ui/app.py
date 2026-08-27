@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import json
-import gzip
 import hashlib
 import os
 import re
 import shlex
 import shutil
-import struct
 import subprocess
 import sys
 import tempfile
@@ -18,6 +16,7 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+import nbtlib
 from flask import Blueprint, abort, jsonify, redirect, render_template, request, send_file, url_for
 POC_ROOT = Path(__file__).resolve().parents[2]
 LITEMATIC_DIR = Path("/home/rsegordon/桌面/OpenClawFile/FileShare/工具/combined/litematic")
@@ -203,63 +202,8 @@ def _with_progress(task):
 
 
 def _read_nbt(path):
-    """Read the small subset of binary NBT needed by Litematica metadata."""
-    with gzip.open(path, "rb") as source:
-        data = source.read()
-    position = 0
-
-    def take(fmt):
-        nonlocal position
-        size = struct.calcsize(fmt)
-        value = struct.unpack_from(fmt, data, position)
-        position += size
-        return value[0] if len(value) == 1 else value
-
-    def text_value():
-        nonlocal position
-        size = take(">H")
-        value = data[position:position + size].decode("utf-8", errors="replace")
-        position += size
-        return value
-
-    def payload(kind):
-        nonlocal position
-        if kind == 1:
-            return take(">b")
-        if kind == 2:
-            return take(">h")
-        if kind == 3:
-            return take(">i")
-        if kind == 4:
-            return take(">q")
-        if kind == 5:
-            return take(">f")
-        if kind == 6:
-            return take(">d")
-        if kind == 7:
-            size = take(">i"); position += size; return None
-        if kind == 8:
-            return text_value()
-        if kind == 9:
-            child, size = take(">b"), take(">i")
-            return [payload(child) for _ in range(size)]
-        if kind == 10:
-            value = {}
-            while True:
-                child = take(">b")
-                if child == 0:
-                    return value
-                name = text_value()
-                value[name] = payload(child)
-        if kind in {11, 12}:
-            size = take(">i"); position += size * (4 if kind == 11 else 8); return None
-        raise ValueError(f"unsupported NBT tag {kind}")
-
-    root_kind = take(">b")
-    if root_kind != 10:
-        raise ValueError("NBT root is not a compound")
-    text_value()
-    return payload(root_kind)
+    """Load a gzip-compressed Litematica NBT document."""
+    return nbtlib.load(path)
 
 
 def _read_litematic_metadata(path):
@@ -276,7 +220,7 @@ def _read_litematic_metadata(path):
             raise ValueError(f"file too large: {file_size} bytes")
         root = _read_nbt(path)
         metadata_field = root.get("Metadata", {})
-        size = root.get("Size", {})
+        size = metadata_field.get("EnclosingSize", {})
         version_int = root.get("MinecraftDataVersion")
         if version_int is None:
             raise ValueError("MinecraftDataVersion missing")
@@ -288,23 +232,25 @@ def _read_litematic_metadata(path):
             "author": str(metadata_field.get("Author") or "—"),
             "version": str(int(version_int)),
         })
-    except (OSError, EOFError, ValueError, TypeError, struct.error) as error:
+    except (OSError, EOFError, KeyError, ValueError, TypeError) as error:
         metadata["metadata_error"] = f"{type(error).__name__}: {error}"
-        print(f"[V121 NBT read] {path}: {metadata['metadata_error']}", file=sys.stderr)
+        print(f"[V122 NBT read] {path}: {metadata['metadata_error']}", file=sys.stderr)
     return metadata
 
 
 def _test_metadata():
-    """V120 smoke tests for the two reported schematics and a broken upload."""
+    """Smoke-test all reported schematics, including the former EOF case."""
     samples = (
-        (Path("/tmp/【MCOO客运】Final 停靠站.litematic"), (11, 7, 48), "停靠站"),
-        (Path("/tmp/地毯机.litematic"), (16, 16, 16), "地毯机"),
+        (Path("/tmp/【MCOO客运】Final 停靠站.litematic"), (11, 7, 48), "3955", "停靠站"),
+        (Path("/tmp/地毯机.litematic"), (16, 16, 16), "4790", "地毯机"),
+        (RAW_DIR / "【MCOO客运】Final 售票机.litematic", (5, 8, 6), "3955", "售票机"),
     )
-    for path, dimensions, label in samples:
+    for path, dimensions, version, label in samples:
         metadata = _read_litematic_metadata(path)
         assert metadata["metadata_error"] is None, f"{label}应解析成功: {metadata}"
         expected = " × ".join(str(value) for value in dimensions)
         assert metadata["dimensions"] == expected, f"{label} dimensions: {metadata['dimensions']}"
+        assert metadata["version"] == version, f"{label} version: {metadata['version']}"
 
     bad_path = None
     try:

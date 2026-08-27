@@ -37,6 +37,7 @@
         .toggle-switch input:checked+.toggle-track .toggle-thumb{transform:translateX(16px)}
         .viewer{position:relative;min-height:320px;display:grid;place-items:center;background:#e8e5e0;border-radius:8px;overflow:hidden}
         .viewer img{display:block;max-width:100%;max-height:72vh;object-fit:contain}
+        .viewer-status{color:var(--muted);font-size:12px}
         .icon-btn{position:absolute;display:grid;place-items:center;width:42px;height:42px;border:0;border-radius:50%;background:rgba(0,0,0,.58);color:#fff;text-decoration:none;cursor:pointer;opacity:0;transition:opacity .18s;font-size:20px;line-height:1}
         .viewer:hover .icon-btn,.icon-btn:focus{opacity:1}
         .prev{left:12px;top:50%;transform:translateY(-50%)}
@@ -91,7 +92,7 @@
                             <div><small>尺寸</small>{{metadata.dimensions}}</div>
                             <div><small>版本</small>{{metadata.version}}</div>
                             <div><small>作者</small>{{metadata.author}}</div>
-                            <div><small>大小</small>{{"%.2f"|format(task.size/1048576)}} MB</div>
+                            <div><small>大小</small>{{task.size|filesizeformat}}</div>
                         </div>
                         <div class="download-actions">
                             <a class="source-download" href="/tools/litematic_render/{{task.id}}/source">下载 .litematic</a>
@@ -115,6 +116,7 @@
                     <button class="icon-btn prev" type="button" aria-label="上一张">‹</button>
                     <button class="icon-btn next" type="button" aria-label="下一张">›</button>
                     <a id="drawing-download" class="icon-btn drawing-download" href="/tools/litematic_render/{{task.id}}/download/paper" download aria-label="下载图片">↓</a>
+                    <span id="viewer-status" class="viewer-status" hidden></span>
                     <span class="viewer-hint">点击图片放大</span>
                     {% else %}
                     <span class="empty">渲染中，完成后自动刷新</span>
@@ -148,6 +150,7 @@
     var toggle=document.getElementById('materials-toggle');
     var img=document.getElementById('drawing');
     var dl=document.getElementById('drawing-download');
+    var status=document.getElementById('viewer-status');
     var available=[];
     var current=0;
     function refreshAvailable(){
@@ -158,10 +161,19 @@
     }
     function showCurrent(){
       current=0;
-      if(!img||!available.length)return;
+      if(!img)return;
+      if(!available.length){
+        img.hidden=true;
+        img.removeAttribute('src');
+        if(dl)dl.hidden=true;
+        if(status){status.textContent=toggle&&toggle.checked?'暂无带材料列表的图片':'暂无无材料列表的图片';status.hidden=false}
+        return;
+      }
       var url='/tools/litematic_render/'+task.id+'/download/'+available[current];
+      img.hidden=false;
       img.src=url;
-      if(dl)dl.href=url;
+      if(dl){dl.hidden=false;dl.href=url}
+      if(status)status.hidden=true;
     }
     function move(delta){
       if(!img||!available.length)return;
