@@ -18,6 +18,7 @@ import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
+import net.minecraft.core.SectionPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
@@ -113,6 +114,13 @@ public final class OffscreenRenderer {
             if (job.passRebuildPending) {
                 client.levelRenderer.invalidateCompiledGeometry(
                         client.level,client.options,client.gameRenderer.mainCamera(),client.getBlockColors());
+                client.level.setSectionRangeDirty(
+                        SectionPos.blockToSectionCoord((int)Math.floor(job.minX)),
+                        SectionPos.blockToSectionCoord((int)Math.floor(job.minY)),
+                        SectionPos.blockToSectionCoord((int)Math.floor(job.minZ)),
+                        SectionPos.blockToSectionCoord((int)Math.ceil(job.maxX)),
+                        SectionPos.blockToSectionCoord((int)Math.ceil(job.maxY)),
+                        SectionPos.blockToSectionCoord((int)Math.ceil(job.maxZ)));
                 job.passRebuildPending = false;
                 job.wait = -120;
                 return;
