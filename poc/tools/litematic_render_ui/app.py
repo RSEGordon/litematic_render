@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import gzip
 import os
 import re
 import shutil
+import struct
 import subprocess
 import threading
 import time
@@ -16,7 +18,7 @@ from flask import Blueprint, abort, jsonify, redirect, render_template, request,
 from werkzeug.utils import secure_filename
 
 POC_ROOT = Path(__file__).resolve().parents[2]
-OUTPUT_ROOT = Path(os.environ.get("LITEMATIC_RENDER_OUTPUT", "/tmp/poc_v101"))
+OUTPUT_ROOT = Path(os.environ.get("LITEMATIC_RENDER_OUTPUT", "/tmp/poc_v102"))
 TASKS_FILE = OUTPUT_ROOT / "tasks.json"
 JAVA_HOME = Path(os.environ.get("LITEMATIC_RENDER_JAVA_HOME", "/opt/java/jdk-25.0.1"))
 _lock = threading.RLock()
@@ -60,6 +62,102 @@ def _update(task_id, **changes):
         _write_tasks(tasks)
 
 
+def _progress(task):
+    """Return the last completed renderer STEP (1..9) as a percentage."""
+    if task.get("status") == "complete":
+        return 100
+    log_path = Path(task.get("output_dir", "")) / "render.log"
+    try:
+        steps = [int(value) for value in re.findall(r"\[STEP ([1-9])\]", log_path.read_text(
+            encoding="utf-8", errors="ignore"))]
+    except OSError:
+        steps = []
+    return round(max(steps, default=0) * 100 / 9)
+
+
+def _with_progress(task):
+    result = dict(task)
+    result["progress"] = _progress(task)
+    return result
+
+
+def _read_nbt(path):
+    """Read the small subset of binary NBT needed by Litematica metadata."""
+    with gzip.open(path, "rb") as source:
+        data = source.read()
+    position = 0
+
+    def take(fmt):
+        nonlocal position
+        size = struct.calcsize(fmt)
+        value = struct.unpack_from(fmt, data, position)
+        position += size
+        return value[0] if len(value) == 1 else value
+
+    def text_value():
+        nonlocal position
+        size = take(">H")
+        value = data[position:position + size].decode("utf-8", errors="replace")
+        position += size
+        return value
+
+    def payload(kind):
+        nonlocal position
+        if kind == 1:
+            return take(">b")
+        if kind == 2:
+            return take(">h")
+        if kind == 3:
+            return take(">i")
+        if kind == 4:
+            return take(">q")
+        if kind == 5:
+            return take(">f")
+        if kind == 6:
+            return take(">d")
+        if kind == 7:
+            size = take(">i"); position += size; return None
+        if kind == 8:
+            return text_value()
+        if kind == 9:
+            child, size = take(">b"), take(">i")
+            return [payload(child) for _ in range(size)]
+        if kind == 10:
+            value = {}
+            while True:
+                child = take(">b")
+                if child == 0:
+                    return value
+                name = text_value()
+                value[name] = payload(child)
+        if kind in {11, 12}:
+            size = take(">i"); position += size * (4 if kind == 11 else 8); return None
+        raise ValueError(f"unsupported NBT tag {kind}")
+
+    root_kind = take(">b")
+    if root_kind != 10:
+        raise ValueError("NBT root is not a compound")
+    text_value()
+    return payload(root_kind)
+
+
+def _read_litematic_metadata(path):
+    metadata = {"name": Path(path).stem, "dimensions": "—", "author": "—", "version": "—"}
+    try:
+        root = _read_nbt(path)
+        source = root.get("Metadata", {})
+        size = source.get("EnclosingSize", {})
+        metadata.update({
+            "name": str(source.get("Name") or metadata["name"]),
+            "dimensions": f'{abs(int(size.get("x", 0)))} × {abs(int(size.get("y", 0)))} × {abs(int(size.get("z", 0)))}',
+            "author": str(source.get("Author") or "—"),
+            "version": str(root.get("Version", "—")),
+        })
+    except (OSError, EOFError, ValueError, TypeError, struct.error):
+        pass
+    return metadata
+
+
 def _run(task_id):
     task = _task(task_id)
     if not task:
@@ -87,7 +185,7 @@ def _run(task_id):
         outputs = {
             "paper": "mcoo_overview_paper.png" if (output / "mcoo_overview_paper.png").is_file() else None,
             "blueprint": "mcoo_overview.png" if (output / "mcoo_overview.png").is_file() else None,
-            "thumbnail": "mcoo_axon_x_pos_z_pos.png" if (output / "mcoo_axon_x_pos_z_pos.png").is_file() else None,
+            "thumbnail": "mcoo_axon_x_pos_z_pos_paper.png" if (output / "mcoo_axon_x_pos_z_pos_paper.png").is_file() else None,
             "workbook": workbook.name if workbook else None,
             "log": log_file.name,
         }
@@ -102,11 +200,11 @@ def _run(task_id):
 
 @bp.get("/tools/litematic_render/")
 def task_list():
-    tasks = sorted(_read_tasks(), key=lambda item: item.get("created_at", 0), reverse=True)
-    # V101 list cards use the +X +Z axonometric render as their video-style cover.
-    # Backfill it in memory for tasks created before the thumbnail output key existed.
+    tasks = sorted((_with_progress(item) for item in _read_tasks()),
+                   key=lambda item: item.get("created_at", 0), reverse=True)
+    # V102 cards use the colour-paper +X +Z axonometric render as their cover.
     for task in tasks:
-        thumbnail = Path(task.get("output_dir", "")) / "mcoo_axon_x_pos_z_pos.png"
+        thumbnail = Path(task.get("output_dir", "")) / "mcoo_axon_x_pos_z_pos_paper.png"
         if thumbnail.is_file():
             task.setdefault("outputs", {})["thumbnail"] = thumbnail.name
     return render_template("litematic_tasks.html", tasks=tasks)
@@ -131,7 +229,7 @@ def upload():
     task = {
         "id": task_id, "filename": original_name, "stored_name": stored_name,
         "source_path": str(source), "output_dir": str(output), "size": source.stat().st_size,
-        "version": "Litematica", "status": "queued", "created_at": int(time.time()), "outputs": {},
+        "status": "queued", "created_at": int(time.time()), "outputs": {},
     }
     with _lock:
         tasks = _read_tasks()
@@ -147,7 +245,9 @@ def task_detail(task_id):
     if not task:
         abort(404)
     materials = _workbook_materials(task)
-    return render_template("litematic_detail.html", task=task, materials=materials)
+    metadata = _read_litematic_metadata(task["source_path"])
+    return render_template("litematic_detail.html", task=_with_progress(task), materials=materials,
+                           metadata=metadata)
 
 
 @bp.get("/api/tools/litematic_render/<task_id>")
@@ -155,7 +255,41 @@ def task_status(task_id):
     task = _task(task_id)
     if not task:
         abort(404)
-    return jsonify(task)
+    return jsonify(_with_progress(task))
+
+
+@bp.post("/api/tools/litematic_render/<task_id>/retry")
+def retry_task(task_id):
+    task = _task(task_id)
+    if not task:
+        abort(404)
+    if task.get("status") != "failed":
+        return jsonify({"ok": False, "error": "只有失败任务可以重试"}), 409
+    output = Path(task["output_dir"])
+    for path in output.iterdir():
+        if path != Path(task["source_path"]):
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+    _update(task_id, status="queued", outputs={}, error=None, started_at=None, finished_at=None)
+    threading.Thread(target=_run, args=(task_id,), daemon=True,
+                     name=f"litematic-retry-{task_id}").start()
+    return jsonify({"ok": True, "task_id": task_id})
+
+
+@bp.delete("/api/tools/litematic_render/<task_id>")
+def delete_task(task_id):
+    with _lock:
+        tasks = _read_tasks()
+        task = next((item for item in tasks if item["id"] == task_id), None)
+        if not task:
+            abort(404)
+        if task.get("status") in {"queued", "rendering"}:
+            return jsonify({"ok": False, "error": "渲染中的任务不能删除"}), 409
+        _write_tasks([item for item in tasks if item["id"] != task_id])
+    shutil.rmtree(task["output_dir"], ignore_errors=True)
+    return jsonify({"ok": True, "task_id": task_id})
 
 
 @bp.get("/tools/litematic_render/<task_id>/source")
@@ -173,7 +307,7 @@ def download_output(task_id, kind):
         abort(404)
     filename = task.get("outputs", {}).get(kind)
     if kind == "thumbnail" and not filename:
-        filename = "mcoo_axon_x_pos_z_pos.png"
+        filename = "mcoo_axon_x_pos_z_pos_paper.png"
     if not filename:
         abort(404)
     path = (Path(task["output_dir"]) / filename).resolve()
