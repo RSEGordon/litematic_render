@@ -110,6 +110,13 @@ public final class OffscreenRenderer {
             client.player.setPos(activeView.position.x,
                     activeView.position.y - client.player.getEyeHeight(), activeView.position.z);
             client.player.setYRot(view.yaw); client.player.setXRot(view.pitch);
+            if (job.passRebuildPending) {
+                client.levelRenderer.invalidateCompiledGeometry(
+                        client.level,client.options,client.gameRenderer.mainCamera(),client.getBlockColors());
+                job.passRebuildPending = false;
+                job.wait = -120;
+                return;
+            }
             job.wait++;
             if (job.blackPass == null) {
                 if (job.screenshotPending) return;
@@ -171,7 +178,9 @@ public final class OffscreenRenderer {
     private static final class Job {
         final Path input, out; final Style style; final long renderTime;
         final double blueprintNightVision, blueprintGamma;
-        boolean loaded, screenshotPending, nightVisionApplied; int wait, view; NativeImage blackPass;
+        boolean loaded, screenshotPending, nightVisionApplied, passRebuildPending;
+        int wait, view;
+        NativeImage blackPass;
         CapturePass capturePass;
         MobEffectInstance previousNightVision;
         double previousGamma;
@@ -431,12 +440,11 @@ public final class OffscreenRenderer {
                     capturePass = CapturePass.BLUEPRINT_EDGE;
                     view = 0;
                     configureCapturePass(client);
-                    client.levelRenderer.invalidateCompiledGeometry(
-                            client.level,client.options,client.gameRenderer.mainCamera(),client.getBlockColors());
                     // Fullbright and directional shading are baked into chunk
-                    // meshes. Give the async rebuild a full settling window
-                    // before taking the first black matte pass for blueprint.
-                    wait = -120;
+                    // meshes. Rebuild on the next normal client tick, after the
+                    // white matte callback has unwound and the front camera is
+                    // active, then give the async rebuild a settling window.
+                    passRebuildPending = true;
                     return;
                 }
                 assembleComposites();
