@@ -6,6 +6,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -307,12 +308,7 @@ public final class OffscreenRenderer {
             for (int i=0;i<paletteNbt.size();i++) palette.add(NbtUtils.readBlockState(BuiltInRegistries.BLOCK, paletteNbt.getCompoundOrEmpty(i)));
             long[] packed=region.getLongArray("BlockStates").orElseThrow(); int bits=Math.max(2, 32-Integer.numberOfLeadingZeros(palette.size()-1)); long mask=(1L<<bits)-1;
             BlockPos origin=new BlockPos(0,originY,0);
-            BlockState air = Blocks.AIR.defaultBlockState();
-            for (int y=client.level.getMinY();y<origin.getY();y++) {
-                for (int z=-32;z<=32;z++) for (int x=-32;x<=32;x++) {
-                    client.level.setBlock(new BlockPos(x,y,z),air,19,512);
-                }
-            }
+            clearRenderBounds(client,origin,sx,sy,sz);
             long[] paletteCounts = new long[palette.size()];
             for (int y=0;y<sy;y++) for (int z=0;z<sz;z++) for (int x=0;x<sx;x++) {
                 int n=(y*sz+z)*sx+x, start=n*bits, word=start>>>6, shift=start&63;
@@ -343,7 +339,7 @@ public final class OffscreenRenderer {
                     origin.getX()+(sizeX<0?sx-1:0),
                     origin.getY()+(sizeY<0?sy-1:0),
                     origin.getZ()+(sizeZ<0?sz-1:0));
-            int entityCount=0;
+            int entityCount=0,mountedEntityCount=0;
             for (int i=0;i<entities.size();i++) {
                 final int entityIndex=i;
                 CompoundTag tag=entities.getCompoundOrEmpty(i).copy();
@@ -354,13 +350,24 @@ public final class OffscreenRenderer {
                     return entity;
                 });
                 if (rootEntity==null) continue;
-                for (Entity entity : rootEntity.getSelfAndPassengers().toList()) {
+                List<Entity> entityTree=rootEntity.getSelfAndPassengers().toList();
+                Map<Entity,Entity> vehicles=new IdentityHashMap<>();
+                for (Entity entity : entityTree) {
+                    if (entity.getVehicle()!=null) vehicles.put(entity,entity.getVehicle());
+                    entity.stopRiding();
                     entity.setId(nextEntityId--);
                     entity.setDeltaMovement(Vec3.ZERO);
                     entity.setNoGravity(true);
                     client.level.addEntity(entity);
                     frozenEntities.add(new FrozenEntity(entity,entity.position()));
                     entityCount++;
+                }
+                for (Map.Entry<Entity,Entity> riding : vehicles.entrySet()) {
+                    if (!riding.getKey().startRiding(riding.getValue(),true,false)) {
+                        throw new IllegalStateException("Failed to restore riding relation for entity "
+                                + riding.getKey().getType());
+                    }
+                    mountedEntityCount++;
                 }
             }
             Files.createDirectories(out);
@@ -376,10 +383,27 @@ public final class OffscreenRenderer {
             client.levelRenderer.invalidateCompiledGeometry(
                     client.level,client.options,client.gameRenderer.mainCamera(),client.getBlockColors());
             loaded=true;
-            System.out.printf("  - loaded: %dx%dx%d palette=%d tiles=%d entities=%d%n  - elapsed: %d ms%n  - bounds: [%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]%n",
-                    sx,sy,sz,palette.size(),tiles.size(),entityCount,
+            System.out.printf("  - loaded: %dx%dx%d palette=%d tiles=%d entities=%d mounted=%d%n  - elapsed: %d ms%n  - bounds: [%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]%n",
+                    sx,sy,sz,palette.size(),tiles.size(),entityCount,mountedEntityCount,
                     (System.nanoTime()-loadStarted)/1_000_000,
                     minX,minY,minZ,maxX,maxY,maxZ);
+        }
+
+        /** Clear every block inside the camera-visible bounds before pasting. */
+        void clearRenderBounds(Minecraft client, BlockPos origin, int sx, int sy, int sz) {
+            int padding=Math.max(2,(int)Math.ceil(Math.max(sx,Math.max(sy,sz))*0.1));
+            int fromX=origin.getX()-padding,toX=origin.getX()+sx-1+padding;
+            int fromY=Math.max(client.level.getMinY(),origin.getY()-padding);
+            int toY=Math.min(client.level.getMaxY()-1,origin.getY()+sy-1+padding);
+            int fromZ=origin.getZ()-padding,toZ=origin.getZ()+sz-1+padding;
+            BlockState air=Blocks.AIR.defaultBlockState();
+            long cleared=0;
+            for (int y=fromY;y<=toY;y++) for (int z=fromZ;z<=toZ;z++) for (int x=fromX;x<=toX;x++) {
+                client.level.setBlock(new BlockPos(x,y,z),air,19,512);
+                cleared++;
+            }
+            System.out.printf("  - cleared render bounds: [%d,%d,%d]-[%d,%d,%d] blocks=%d%n",
+                    fromX,fromY,fromZ,toX,toY,toZ,cleared);
         }
 
         void configureCapturePass(Minecraft client) {
