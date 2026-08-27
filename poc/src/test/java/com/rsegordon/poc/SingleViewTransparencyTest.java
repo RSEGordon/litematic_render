@@ -37,4 +37,14 @@ final class SingleViewTransparencyTest {
         assertThrows(IllegalStateException.class,
                 () -> OffscreenRenderer.assertBareSingleView(output));
     }
+
+    @Test
+    void rejectsAnEmptyTransparentCanvasAsASingleView() throws Exception {
+        BufferedImage empty = new BufferedImage(8, 8, BufferedImage.TYPE_INT_ARGB);
+        Path output = temporaryDirectory.resolve("empty.png");
+        ImageIO.write(empty, "PNG", output.toFile());
+
+        assertThrows(IllegalStateException.class,
+                () -> OffscreenRenderer.assertBareSingleView(output));
+    }
 }

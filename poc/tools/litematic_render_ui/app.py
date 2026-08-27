@@ -18,7 +18,7 @@ from flask import Blueprint, abort, jsonify, redirect, render_template, request,
 from werkzeug.utils import secure_filename
 
 POC_ROOT = Path(__file__).resolve().parents[2]
-OUTPUT_ROOT = Path(os.environ.get("LITEMATIC_RENDER_OUTPUT", "/tmp/poc_v102"))
+OUTPUT_ROOT = Path(os.environ.get("LITEMATIC_RENDER_OUTPUT", "/tmp/poc_v103"))
 TASKS_FILE = OUTPUT_ROOT / "tasks.json"
 JAVA_HOME = Path(os.environ.get("LITEMATIC_RENDER_JAVA_HOME", "/opt/java/jdk-25.0.1"))
 _lock = threading.RLock()

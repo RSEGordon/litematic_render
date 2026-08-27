@@ -300,11 +300,19 @@ public final class OffscreenRenderer {
                 Entity rootEntity=EntityType.loadEntityRecursive(tag,client.level,
                         new EntitySpawnRequest(EntitySpawnReason.LOAD,false), entity -> {
                     entity.setUUID(UUID.randomUUID());
-                    entity.setPos(entity.position().add(entityOrigin));
                     return entity;
                 });
                 if (rootEntity==null) continue;
+                // Litematica stores the root entity in region-local coordinates,
+                // while passenger Pos tags may retain their old world coordinates.
+                // Translate the root once, then anchor riders to their vehicle;
+                // translating every recursively loaded entity made stale passenger
+                // coordinates expand the camera bounds and the build disappeared.
+                rootEntity.setPos(rootEntity.position().add(entityOrigin));
                 for (Entity entity : rootEntity.getSelfAndPassengers().toList()) {
+                    if (entity.getVehicle() != null) {
+                        entity.setPos(entity.getVehicle().position());
+                    }
                     entity.setId(nextEntityId--);
                     entity.setDeltaMovement(Vec3.ZERO);
                     entity.setNoGravity(true);
