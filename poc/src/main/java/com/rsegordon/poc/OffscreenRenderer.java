@@ -14,6 +14,7 @@ import java.util.UUID;
 
 import com.mojang.blaze3d.platform.NativeImage;
 import org.joml.Matrix4f;
+import org.joml.Vector4f;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.server.IntegratedServer;
@@ -22,6 +23,8 @@ import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
+import net.minecraft.client.renderer.state.level.LevelRenderState;
+import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.SectionPos;
@@ -88,12 +91,23 @@ public final class OffscreenRenderer {
     public static void applyProjection(CameraRenderState camera) {
         if (activeView == null) return;
         Minecraft client = Minecraft.getInstance();
-        float aspect = (float) client.getWindow().getWidth() / client.getWindow().getHeight();
+        float aspect = renderTargetAspect(client);
         camera.projectionMatrix.setOrtho(
                 -activeView.halfSize * aspect, activeView.halfSize * aspect,
                 -activeView.halfSize, activeView.halfSize,
                 activeView.farPlane, 0.05f);
         camera.depthFar = activeView.farPlane;
+        if (job != null) job.logProjection(client, aspect);
+    }
+
+    /** Read-only callback after vanilla LevelExtractor has populated entityRenderStates. */
+    public static void diagnoseEntityExtraction(LevelRenderState state) {
+        if (job != null && activeView != null) job.diagnoseEntityExtraction(state);
+    }
+
+    private static float renderTargetAspect(Minecraft client) {
+        var target = client.gameRenderer.mainRenderTarget();
+        return target.height == 0 ? 1.0f : (float)target.width / target.height;
     }
 
     private static void tick(Minecraft client) {
@@ -229,6 +243,7 @@ public final class OffscreenRenderer {
         final List<MaterialEntry> materials=new ArrayList<>();
         NativeImage materialBlackPass;
         int nextEntityId = -1000;
+        String lastEntityDiagnosticKey, lastProjectionDiagnosticKey;
         // Per-view saved native image (post alpha matting) for composite assembly
         final NativeImage[] composites = new NativeImage[View.values().length];
         Job(Path input, Path out) {
@@ -387,9 +402,14 @@ public final class OffscreenRenderer {
                 for (Entity entity : entityTree) {
                     frozenEntities.add(new FrozenEntity(entity,entity.position()));
                     include(entity.getBoundingBox());
-                    System.out.printf("  - entity: type=%s id=%d pos=(%.2f,%.2f,%.2f) bounds=%s registered=true%n",
-                            entity.getType(),entity.getId(),entity.getX(),entity.getY(),entity.getZ(),
-                            entity.getBoundingBox());
+                    System.out.printf("ENTITY_LOAD type=%s id=%d uuid=%s position=(%.4f,%.4f,%.4f) "
+                                    + "boundingBox=%s registered=%s removed=%s removalReason=%s alive=%s "
+                                    + "vehicle=%s passengers=%s%n",
+                            entity.getType(),entity.getId(),entity.getUUID(),entity.getX(),entity.getY(),entity.getZ(),
+                            entity.getBoundingBox(),client.level.getEntity(entity.getId()) == entity,
+                            entity.isRemoved(),entity.getRemovalReason(),entity.isAlive(),
+                            entity.getVehicle() == null ? "none" : entity.getVehicle().getId(),
+                            entity.getPassengers().stream().map(passenger -> Integer.toString(passenger.getId())).toList());
                 }
             }
             Files.createDirectories(out);
@@ -507,7 +527,7 @@ public final class OffscreenRenderer {
                     vertical=Math.max(vertical,Math.abs(delta.dot(up)));
                     radius=Math.max(radius,delta.length());
                 }
-            float aspect=(float)client.getWindow().getWidth()/client.getWindow().getHeight();
+            float aspect=renderTargetAspect(client);
             float halfSize;
             if (isPrincipalView(view)) {
                 // All six principal views use one drawing scale.
@@ -527,6 +547,120 @@ public final class OffscreenRenderer {
             Vec3 position=center.subtract(forward.scale(distance));
             float farPlane=(float)Math.max(256.0,distance+radius+32.0);
             return new ViewState(position,halfSize,farPlane);
+        }
+
+        void logProjection(Minecraft client, float projectionAspect) {
+            View captureView=View.values()[Math.min(view,View.values().length-1)];
+            String key=capturePass+":"+captureView;
+            if (key.equals(lastProjectionDiagnosticKey)) return;
+            lastProjectionDiagnosticKey=key;
+            var window=client.getWindow();
+            var target=client.gameRenderer.mainRenderTarget();
+            double windowAspect=aspect(window.getWidth(),window.getHeight());
+            double framebufferAspect=aspect(window.getScreenWidth(),window.getScreenHeight());
+            double targetAspect=aspect(target.width,target.height);
+            System.out.printf(Locale.ROOT,
+                    "CAPTURE_DIMENSIONS view=%s pass=%s REQUESTED_WINDOW=%s WINDOW_LOGICAL=%dx%d "
+                            + "FRAMEBUFFER=%dx%d RENDER_TARGET=%dx%d WINDOW_ASPECT=%.6f "
+                            + "FRAMEBUFFER_ASPECT=%.6f TARGET_ASPECT=%.6f PROJECTION_ASPECT=%.6f%n",
+                    captureView,capturePass,requestedWindowSize(),window.getWidth(),window.getHeight(),
+                    window.getScreenWidth(),window.getScreenHeight(),target.width,target.height,
+                    windowAspect,framebufferAspect,targetAspect,projectionAspect);
+            if (!sameAspect(projectionAspect,targetAspect))
+                System.out.printf(Locale.ROOT,"WARN ASPECT_MISMATCH projection=%.6f target=%.6f%n",
+                        projectionAspect,targetAspect);
+            if (!sameAspect(windowAspect,targetAspect))
+                System.out.printf(Locale.ROOT,"WARN ASPECT_MISMATCH window=%.6f target=%.6f%n",
+                        windowAspect,targetAspect);
+            if (!sameAspect(framebufferAspect,targetAspect))
+                System.out.printf(Locale.ROOT,"WARN ASPECT_MISMATCH framebuffer=%.6f target=%.6f%n",
+                        framebufferAspect,targetAspect);
+        }
+
+        void diagnoseEntityExtraction(LevelRenderState state) {
+            // Diagnose the settled frame immediately before the black capture,
+            // not the transitional frame where the player camera just moved.
+            if (blackPass == null && wait < 30) return;
+            View captureView=View.values()[Math.min(view,View.values().length-1)];
+            String key=capturePass+":"+captureView;
+            if (key.equals(lastEntityDiagnosticKey)) return;
+            lastEntityDiagnosticKey=key;
+            int clientEntityCount=0;
+            for (Entity ignored : Minecraft.getInstance().level.entitiesForRendering()) clientEntityCount++;
+            System.out.printf("ENTITY_EXTRACTION view=%s pass=%s clientLevelEntityCount=%d renderStateCount=%d trackedEntityCount=%d%n",
+                    captureView,capturePass,clientEntityCount,state.entityRenderStates.size(),frozenEntities.size());
+            CameraRenderState camera=state.cameraRenderState;
+            for (FrozenEntity frozen : frozenEntities) {
+                Entity entity=frozen.entity;
+                double distance=entity.position().distanceTo(camera.pos);
+                boolean registered=Minecraft.getInstance().level.getEntity(entity.getId()) == entity;
+                System.out.printf(Locale.ROOT,
+                        "ENTITY_VIEW_CHECK view=%s entityId=%d type=%s position=(%.4f,%.4f,%.4f) "
+                                + "boundingBox=%s cameraPosition=(%.4f,%.4f,%.4f) distanceToCamera=%.4f "
+                                + "registered=%s removed=%s alive=%s%n",
+                        captureView,entity.getId(),entity.getType(),entity.getX(),entity.getY(),entity.getZ(),
+                        entity.getBoundingBox(),camera.pos.x,camera.pos.y,camera.pos.z,distance,
+                        registered,entity.isRemoved(),entity.isAlive());
+                ClipBounds clip=clipBounds(entity.getBoundingBox(),camera);
+                boolean frustumVisible=camera.cullFrustum != null && camera.cullFrustum.isVisible(entity.getBoundingBox());
+                boolean shouldRender=camera.cullFrustum != null && Minecraft.getInstance().levelRenderer
+                        .entityRenderDispatcher().shouldRender(entity,camera.cullFrustum,
+                                camera.pos.x,camera.pos.y,camera.pos.z);
+                System.out.printf(Locale.ROOT,
+                        "ENTITY_CLIP view=%s entityId=%d clipMinX=%.6f clipMaxX=%.6f "
+                                + "clipMinY=%.6f clipMaxY=%.6f clipMinZ=%.6f clipMaxZ=%.6f "
+                                + "IN_CLIP=%s FRUSTUM_VISIBLE=%s shouldRender=%s renderDistanceDecision=%s%n",
+                        captureView,entity.getId(),clip.minX,clip.maxX,clip.minY,clip.maxY,
+                        clip.minZ,clip.maxZ,clip.inClip,frustumVisible,shouldRender,shouldRender);
+                EntityRenderState matched=null;
+                for (EntityRenderState candidate : state.entityRenderStates) {
+                    if (candidate.entityType == entity.getType()
+                            && close(candidate.x,entity.getX()) && close(candidate.y,entity.getY())
+                            && close(candidate.z,entity.getZ())) { matched=candidate; break; }
+                }
+                System.out.printf(Locale.ROOT,
+                        "ENTITY_RENDER_STATE id=%d type=%s found=%s matchBasis=type+position%s%n",
+                        entity.getId(),entity.getType(),matched != null,
+                        matched == null ? "" : String.format(Locale.ROOT," distanceToCameraSq=%.6f",matched.distanceToCameraSq));
+                System.out.printf("ENTITY_EXTRACTION view=%s trackedEntityId=%d trackedEntityType=%s renderStateFound=%s%n",
+                        captureView,entity.getId(),entity.getType(),matched != null);
+            }
+        }
+
+        private static ClipBounds clipBounds(AABB box, CameraRenderState camera) {
+            Matrix4f viewProjection=new Matrix4f(camera.projectionMatrix).mul(camera.viewRotationMatrix);
+            double minX=Double.POSITIVE_INFINITY,minY=Double.POSITIVE_INFINITY,minZ=Double.POSITIVE_INFINITY;
+            double maxX=Double.NEGATIVE_INFINITY,maxY=Double.NEGATIVE_INFINITY,maxZ=Double.NEGATIVE_INFINITY;
+            for (double x : new double[]{box.minX,box.maxX}) for (double y : new double[]{box.minY,box.maxY})
+                for (double z : new double[]{box.minZ,box.maxZ}) {
+                    Vector4f clip=viewProjection.transform(new Vector4f(
+                            (float)(x-camera.pos.x),(float)(y-camera.pos.y),(float)(z-camera.pos.z),1.0f));
+                    double divisor=clip.w == 0.0f ? 1.0 : clip.w;
+                    double nx=clip.x/divisor,ny=clip.y/divisor,nz=clip.z/divisor;
+                    minX=Math.min(minX,nx);maxX=Math.max(maxX,nx);
+                    minY=Math.min(minY,ny);maxY=Math.max(maxY,ny);
+                    minZ=Math.min(minZ,nz);maxZ=Math.max(maxZ,nz);
+                }
+            boolean inClip=minX<=1 && maxX>=-1 && minY<=1 && maxY>=-1 && minZ<=1 && maxZ>=-1;
+            return new ClipBounds(minX,maxX,minY,maxY,minZ,maxZ,inClip);
+        }
+
+        private record ClipBounds(double minX,double maxX,double minY,double maxY,
+                                  double minZ,double maxZ,boolean inClip) {}
+
+        private static boolean close(double left,double right) { return Math.abs(left-right)<1.0e-3; }
+        private static double aspect(int width,int height) { return height == 0 ? Double.NaN : width/(double)height; }
+        private static boolean sameAspect(double left,double right) { return Math.abs(left-right)<1.0e-4; }
+
+        private static String requestedWindowSize() {
+            String requestedWidth=System.getProperty("litematic.requested.width");
+            String requestedHeight=System.getProperty("litematic.requested.height");
+            if (requestedWidth != null && requestedHeight != null)
+                return requestedWidth+"x"+requestedHeight;
+            String command=System.getProperty("sun.java.command","");
+            java.util.regex.Matcher width=java.util.regex.Pattern.compile("(?:^|\\s)--width(?:=|\\s+)(\\d+)").matcher(command);
+            java.util.regex.Matcher height=java.util.regex.Pattern.compile("(?:^|\\s)--height(?:=|\\s+)(\\d+)").matcher(command);
+            return width.find() && height.find() ? width.group(1)+"x"+height.group(1) : "UNAVAILABLE";
         }
 
         private static boolean isPrincipalView(View view) {
@@ -947,14 +1081,24 @@ public final class OffscreenRenderer {
                                   int size, boolean rotateCounterClockwise,
                                   Style style) {
             BufferedImage source = viewsFor(style)[view.ordinal()];
+            int sourceWidth=source.getWidth(),sourceHeight=source.getHeight();
+            double fitScale=Math.min(size/(double)sourceWidth,size/(double)sourceHeight);
+            int drawWidth=Math.max(1,(int)Math.round(sourceWidth*fitScale));
+            int drawHeight=Math.max(1,(int)Math.round(sourceHeight*fitScale));
+            int drawX=x+(size-drawWidth)/2,drawY=y+(size-drawHeight)/2;
+            System.out.printf(Locale.ROOT,
+                    "VIEW_FIT %s source=%dx%d sourceAspect=%.6f cell=%dx%d draw=%dx%d "
+                            + "drawAspect=%.6f offset=(%d,%d)%n",
+                    view,sourceWidth,sourceHeight,sourceWidth/(double)sourceHeight,size,size,
+                    drawWidth,drawHeight,drawWidth/(double)drawHeight,drawX-x,drawY-y);
             if (rotateCounterClockwise) {
                 java.awt.Graphics2D rotated = (java.awt.Graphics2D)g.create();
                 // Java2D's Y axis points down, so a negative angle is visually CCW.
                 rotated.rotate(-Math.PI / 2.0, x + size / 2.0, y + size / 2.0);
-                rotated.drawImage(source, x, y, size, size, null);
+                rotated.drawImage(source, drawX, drawY, drawWidth, drawHeight, null);
                 rotated.dispose();
             } else {
-                g.drawImage(source, x, y, size, size, null);
+                g.drawImage(source, drawX, drawY, drawWidth, drawHeight, null);
             }
         }
 

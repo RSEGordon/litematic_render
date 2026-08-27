@@ -12,6 +12,7 @@ public final class LitematicRenderMod implements ClientModInitializer {
         long parseStarted = System.nanoTime();
         LitematicRenderCommand.register();
         String[] args = FabricLoader.getInstance().getLaunchArguments(false);
+        rememberRequestedWindow(args);
         int inputIndex = positionalInputIndex(args);
         String input = inputIndex >= 0 ? args[inputIndex] : null;
         String output = positionalOutput(args, inputIndex);
@@ -21,6 +22,18 @@ public final class LitematicRenderMod implements ClientModInitializer {
                 input, output, (System.nanoTime() - parseStarted) / 1_000_000);
         if (input != null && output != null) OffscreenRenderer.arm(input, output);
         else System.out.println("[STEP ERROR] missing input or output path; renderer not armed");
+    }
+
+    private static void rememberRequestedWindow(String[] args) {
+        for (int i=0;i<args.length;i++) {
+            if ((args[i].equals("--width") || args[i].equals("--height")) && i+1<args.length) {
+                System.setProperty("litematic.requested."+args[i].substring(2),args[++i]);
+            } else if (args[i].startsWith("--width=")) {
+                System.setProperty("litematic.requested.width",args[i].substring("--width=".length()));
+            } else if (args[i].startsWith("--height=")) {
+                System.setProperty("litematic.requested.height",args[i].substring("--height=".length()));
+            }
+        }
     }
 
     private static int positionalInputIndex(String[] args) {

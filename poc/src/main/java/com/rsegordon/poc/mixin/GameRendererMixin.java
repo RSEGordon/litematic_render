@@ -20,4 +20,11 @@ public abstract class GameRendererMixin {
         CameraRenderState camera = self.gameRenderState().levelRenderState.cameraRenderState;
         OffscreenRenderer.applyProjection(camera);
     }
+
+    @Inject(method = "extract", at = @At("RETURN"))
+    private void litematicRender$diagnoseEntityExtraction(
+            DeltaTracker deltaTracker, boolean renderLevel, CallbackInfo ci) {
+        GameRenderer self = (GameRenderer) (Object) this;
+        OffscreenRenderer.diagnoseEntityExtraction(self.gameRenderState().levelRenderState);
+    }
 }
