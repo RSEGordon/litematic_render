@@ -26,6 +26,7 @@ JAVA_HOME = Path(os.environ.get("LITEMATIC_RENDER_JAVA_HOME", "/opt/java/jdk-25.
 _lock = threading.RLock()
 _render_lock = threading.Lock()
 bp = Blueprint("litematic_render", __name__, template_folder="templates")
+MAX_RENDER_DIMENSION = 80
 
 
 def _page_nav(page, extra_right=""):
@@ -238,6 +239,13 @@ def _read_litematic_metadata(path):
     return metadata
 
 
+def _metadata_dimensions(metadata):
+    """Return the three integer dimensions from display metadata, if valid."""
+    dimensions = re.fullmatch(r"\s*(\d+)\s*×\s*(\d+)\s*×\s*(\d+)\s*",
+                              str(metadata.get("dimensions", "")))
+    return tuple(map(int, dimensions.groups())) if dimensions else None
+
+
 def _test_metadata():
     """Smoke-test all reported schematics, including the former EOF case."""
     samples = (
@@ -340,6 +348,16 @@ def upload():
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     temporary = RAW_DIR / f".{task_id}.upload"
     uploaded.save(temporary)
+    metadata = _read_litematic_metadata(temporary)
+    dimensions = _metadata_dimensions(metadata)
+    if dimensions and max(dimensions) > MAX_RENDER_DIMENSION:
+        temporary.unlink(missing_ok=True)
+        largest = max(dimensions)
+        return jsonify({
+            "error": f"投影过大无法渲染 (最大边 {largest} > {MAX_RENDER_DIMENSION} 块)",
+            "dimensions": metadata["dimensions"],
+            "limit": MAX_RENDER_DIMENSION,
+        }), 413
     with temporary.open("rb") as upload_data:
         digest = hashlib.file_digest(upload_data, "sha256").hexdigest()[:8]
     with _lock:

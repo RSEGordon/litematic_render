@@ -31,6 +31,8 @@
         .input-form .upload-submit:hover{background:#7B95A5;transform:translateY(-1px);box-shadow:0 4px 12px rgba(139,165,181,.25)}
         .input-form .upload-submit.show{display:inline-flex;align-items:center;gap:6px}
         .input-form .upload-submit svg{flex-shrink:0}
+        .upload-error{display:none;margin:14px 0 0;padding:10px 14px;border-radius:8px;background:#F4E4E2;color:#8A5550;font-size:13px}
+        .upload-error.show{display:block}
 
         .history-section{background:var(--bg);border-radius:10px;padding:14px 16px}
         .history-section h2{font-size:13px;color:var(--muted);margin:0 0 10px;font-weight:600}
@@ -93,6 +95,7 @@
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                 开始渲染
             </button>
+            <div class="upload-error" id="upload-error" role="alert" aria-live="polite"></div>
         </form>
 
         <div class="history-section">
@@ -162,6 +165,7 @@
       var input=document.getElementById('litematic-input');
       var fileName=document.getElementById('file-name');
       var submitBtn=document.getElementById('upload-submit');
+      var uploadError=document.getElementById('upload-error');
       if(!form||!input)return;
       function update(file){
         if(file){
@@ -175,6 +179,23 @@
         }
       }
       input.addEventListener('change',function(){update(input.files[0])});
+      form.addEventListener('submit',async function(e){
+        e.preventDefault();
+        uploadError.classList.remove('show');
+        submitBtn.disabled=true;
+        try{
+          var response=await fetch(form.action,{method:'POST',body:new FormData(form)});
+          if(response.ok){location.href=response.url;return}
+          var result=await response.json().catch(function(){return {}});
+          uploadError.textContent=result.error||'上传失败，请稍后重试';
+          uploadError.classList.add('show');
+        }catch(error){
+          uploadError.textContent='上传失败，请检查网络后重试';
+          uploadError.classList.add('show');
+        }finally{
+          submitBtn.disabled=false;
+        }
+      });
       ['dragenter','dragover'].forEach(function(evt){
         form.addEventListener(evt,function(e){e.preventDefault();e.stopPropagation();form.classList.add('dragging')});
       });
