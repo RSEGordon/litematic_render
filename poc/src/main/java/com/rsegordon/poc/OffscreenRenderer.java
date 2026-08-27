@@ -6,6 +6,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 import com.mojang.blaze3d.platform.NativeImage;
@@ -16,7 +17,9 @@ import net.minecraft.client.Screenshot;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Holder;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.ListTag;
@@ -31,6 +34,9 @@ import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.clock.ClockNetworkState;
+import net.minecraft.world.clock.WorldClock;
+import net.minecraft.world.clock.WorldClocks;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import javax.imageio.ImageIO;
@@ -43,6 +49,7 @@ import java.awt.image.Kernel;
 /** Minimal proof: populate a ClientWorld, let the normal WorldRenderer draw it, copy its framebuffer. */
 public final class OffscreenRenderer {
     private static final java.awt.Color BLUEPRINT_LINE = java.awt.Color.WHITE;
+    private static final long PAPER_DAY_TIME = 6000L;
     /** 32 chunks covers a 100-block structure plus the most distant axonometric camera. */
     private static final int RENDER_DISTANCE_CHUNKS = 32;
     private static Job job;
@@ -88,6 +95,7 @@ public final class OffscreenRenderer {
             // view-distance update and initial chunk packets to settle.
             if (!job.loaded && worldSettleTicks++ < 60) return;
             if (!job.loaded) { job.load(client); return; }
+            job.enforceCaptureTime(client);
             job.freezeEntities();
             View view = View.values()[Math.min(job.view, View.values().length - 1)];
             activeView = job.cameraFor(view, client);
@@ -158,6 +166,7 @@ public final class OffscreenRenderer {
         CapturePass capturePass;
         MobEffectInstance previousNightVision;
         double previousGamma;
+        long previousDayTime;
         double minX, minY, minZ, maxX, maxY, maxZ;
         final List<FrozenEntity> frozenEntities=new ArrayList<>();
         int nextEntityId = -1000;
@@ -238,8 +247,8 @@ public final class OffscreenRenderer {
             if (!client.gui.hud.isHidden()) client.gui.hud.toggle();
             client.options.fov().set(50);
             previousGamma = client.options.gamma().get();
+            previousDayTime = client.level.getOverworldClockTime();
             client.options.renderDistance().set(RENDER_DISTANCE_CHUNKS);
-            client.level.setTimeFromServer(renderTime);
             configureCapturePass(client);
             // Recreate section geometry with the safe 26.2 path. Unlike
             // resetLevelRenderData(), this waits for the occlusion graph reset
@@ -255,6 +264,13 @@ public final class OffscreenRenderer {
 
         void configureCapturePass(Minecraft client) {
             clearNightVision(client);
+            long targetTime = capturePass == CapturePass.PAPER_COLOR ? PAPER_DAY_TIME : renderTime;
+            setOverworldClock(client, targetTime, 0.0f);
+            long actualTime = client.level.getOverworldClockTime();
+            if (actualTime != targetTime) {
+                throw new IllegalStateException("Failed to set " + capturePass
+                        + " time: expected=" + targetTime + " actual=" + actualTime);
+            }
             // Vanilla 26.2 constrains the Brightness option to 0..1. Keep its
             // neutral value here; BLUEPRINT_EDGE applies the requested render
             // gamma directly to the captured RGBA pixels below.
@@ -268,8 +284,15 @@ public final class OffscreenRenderer {
                         Math.max(0, (int)Math.round(nightVision)), false, false));
                 nightVisionApplied = true;
             }
-            System.out.printf("CAPTURE_PASS %s gamma=%.2f nightvision=%.2f%n",
-                    capturePass, activeGamma(), nightVision);
+            System.out.printf("CAPTURE_PASS %s time=%d gamma=%.2f nightvision=%.2f%n",
+                    capturePass, actualTime, activeGamma(), nightVision);
+        }
+
+        void enforceCaptureTime(Minecraft client) {
+            long targetTime = capturePass == CapturePass.PAPER_COLOR ? PAPER_DAY_TIME : renderTime;
+            if (client.level.getOverworldClockTime() != targetTime) {
+                setOverworldClock(client, targetTime, 0.0f);
+            }
         }
 
         double activeGamma() {
@@ -403,6 +426,7 @@ public final class OffscreenRenderer {
                 closeCapturedViews();
                 clearNightVision(client);
                 client.options.gamma().set(previousGamma);
+                setOverworldClock(client, previousDayTime, 1.0f);
                 System.out.println("LITEMATIC_RENDER_DONE " + out);
                 client.stop();
                 job = null;
@@ -649,20 +673,6 @@ public final class OffscreenRenderer {
             return outputStyle == Style.PAPER ? colorViews : blueprintViews;
         }
 
-        private static void writeSingleView(BufferedImage source, Path file) throws Exception {
-            // Single views are bare transparent assets. Sheet background, grid,
-            // border, labels and scale furniture belong only to composites.
-            BufferedImage bare = new BufferedImage(
-                    source.getWidth(), source.getHeight(), BufferedImage.TYPE_INT_ARGB);
-            int[] pixels = source.getRGB(0, 0, source.getWidth(), source.getHeight(),
-                    null, 0, source.getWidth());
-            bare.setRGB(0, 0, source.getWidth(), source.getHeight(),
-                    pixels, 0, source.getWidth());
-            ImageIO.write(bare, "PNG", file.toFile());
-            bare.flush();
-            System.out.println("WROTE " + file);
-        }
-
         private static BufferedImage nativeToBuffered(NativeImage ni) {
             // NativeImage in MC 1.21.1 is top-left origin (same as BufferedImage),
             // so we copy pixel-for-pixel without Y flip. The earlier code flipped
@@ -878,6 +888,54 @@ public final class OffscreenRenderer {
             }
         }
 
+        private static void setOverworldClock(Minecraft client, long time, float rate) {
+            Holder<WorldClock> overworldClock = client.level.registryAccess()
+                    .lookupOrThrow(Registries.WORLD_CLOCK)
+                    .getOrThrow(WorldClocks.OVERWORLD);
+            client.level.clockManager().handleUpdates(
+                    client.level.getDefaultClockTime(),
+                    Map.of(overworldClock, new ClockNetworkState(time, 0.0f, rate)));
+        }
+
+    }
+
+    static void writeSingleView(BufferedImage source, Path file) throws Exception {
+        // This is the only single-view output path. It copies view pixels onto a
+        // fresh transparent canvas and never calls any sheet/background helper.
+        BufferedImage bare = new BufferedImage(
+                source.getWidth(), source.getHeight(), BufferedImage.TYPE_INT_ARGB);
+        int[] pixels = source.getRGB(0, 0, source.getWidth(), source.getHeight(),
+                null, 0, source.getWidth());
+        bare.setRGB(0, 0, source.getWidth(), source.getHeight(),
+                pixels, 0, source.getWidth());
+        if (!ImageIO.write(bare, "PNG", file.toFile())) {
+            throw new IllegalStateException("No PNG writer available for " + file);
+        }
+        bare.flush();
+        assertBareSingleView(file);
+        System.out.println("WROTE BARE SINGLE VIEW " + file);
+    }
+
+    static void assertBareSingleView(Path file) throws Exception {
+        BufferedImage image = ImageIO.read(file.toFile());
+        if (image == null || !image.getColorModel().hasAlpha()) {
+            throw new IllegalStateException("Single view is not an alpha PNG: " + file);
+        }
+        boolean transparent = false;
+        boolean opaque = false;
+        for (int y = 0; y < image.getHeight() && !(transparent && opaque); y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                int alpha = image.getRGB(x, y) >>> 24;
+                transparent |= alpha == 0;
+                opaque |= alpha == 255;
+            }
+        }
+        image.flush();
+        if (!transparent || !opaque) {
+            throw new IllegalStateException("Single view must contain transparent background"
+                    + " and opaque view content: " + file + " transparent=" + transparent
+                    + " opaque=" + opaque);
+        }
     }
 
     private record FrozenEntity(Entity entity, Vec3 position) {}
