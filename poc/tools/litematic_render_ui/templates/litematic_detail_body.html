@@ -154,10 +154,11 @@
     var available=[];
     var currentView='paper';
     var currentMaterials=toggle?toggle.checked:true;
+    function kindForView(view){return view+(currentMaterials?'':'_no_materials')}
     function refreshAvailable(){
       var outputs=task.outputs||{};
-      var paperKey=currentMaterials?'paper':'paper_no_materials';
-      var blueprintKey=currentMaterials?'blueprint':'blueprint_no_materials';
+      var paperKey=kindForView('paper');
+      var blueprintKey=kindForView('blueprint');
       available=[];
       if(outputs[paperKey])available.push(paperKey);
       if(outputs[blueprintKey])available.push(blueprintKey);
@@ -171,7 +172,7 @@
         if(status){status.textContent=currentMaterials?'暂无带材料列表的图片':'暂无无材料列表的图片';status.hidden=false}
         return;
       }
-      var targetKind=currentView==='blueprint'?(currentMaterials?'blueprint':'blueprint_no_materials'):(currentMaterials?'paper':'paper_no_materials');
+      var targetKind=kindForView(currentView);
       if(!available.includes(targetKind))targetKind=available[0];
       var url='/tools/litematic_render/'+task.id+'/download/'+targetKind;
       img.hidden=false;
