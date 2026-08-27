@@ -36,7 +36,7 @@
         .toggle-switch input:checked+.toggle-track{background:var(--blue)}
         .toggle-switch input:checked+.toggle-track .toggle-thumb{transform:translateX(16px)}
         .viewer{position:relative;min-height:320px;display:grid;place-items:center;background:#e8e5e0;border-radius:8px;overflow:hidden}
-        .viewer img{display:block;max-width:100%;max-height:72vh;object-fit:contain}
+        .viewer img{display:block;max-width:100%;max-height:72vh;object-fit:contain;image-rendering:-webkit-optimize-contrast;image-rendering:crisp-edges}
         .viewer-status{color:var(--muted);font-size:12px}
         .icon-btn{position:absolute;display:grid;place-items:center;width:42px;height:42px;border:0;border-radius:50%;background:rgba(0,0,0,.58);color:#fff;text-decoration:none;cursor:pointer;opacity:0;transition:opacity .18s;font-size:20px;line-height:1}
         .viewer:hover .icon-btn,.icon-btn:focus{opacity:1}
@@ -49,7 +49,7 @@
         .image-modal.open{display:flex}
         .image-modal-close{position:absolute;top:20px;right:20px;z-index:2;width:42px;height:42px;border-radius:50%;background:rgba(255,255,255,.15);color:#fff;border:0;font-size:24px;cursor:pointer;line-height:1;display:grid;place-items:center;transition:background .15s}
         .image-modal-close:hover{background:rgba(255,255,255,.3)}
-        .image-modal img{max-width:95vw;max-height:95vh;object-fit:contain;cursor:grab;box-shadow:0 8px 32px rgba(0,0,0,.5);user-select:none;-webkit-user-drag:none;will-change:transform}
+        .image-modal img{flex:none;width:auto;height:auto;max-width:none;max-height:none;cursor:grab;box-shadow:0 8px 32px rgba(0,0,0,.5);user-select:none;-webkit-user-drag:none;will-change:transform,width;image-rendering:pixelated;image-rendering:-moz-crisp-edges}
         .image-modal img.dragging{cursor:grabbing}
         .empty{color:var(--muted);font-size:12px}
         .workbook{display:flex;align-items:center;gap:14px;color:inherit;text-decoration:none}
@@ -152,24 +152,28 @@
     var dl=document.getElementById('drawing-download');
     var status=document.getElementById('viewer-status');
     var available=[];
-    var current=0;
+    var currentView='paper';
+    var currentMaterials=toggle?toggle.checked:true;
     function refreshAvailable(){
-      available=[];
       var outputs=task.outputs||{};
-      var keys=toggle&&toggle.checked?['paper','blueprint']:['paper_no_materials','blueprint_no_materials'];
-      keys.forEach(function(kind){if(outputs[kind])available.push(kind)});
+      var paperKey=currentMaterials?'paper':'paper_no_materials';
+      var blueprintKey=currentMaterials?'blueprint':'blueprint_no_materials';
+      available=[];
+      if(outputs[paperKey])available.push(paperKey);
+      if(outputs[blueprintKey])available.push(blueprintKey);
     }
     function showCurrent(){
-      current=0;
       if(!img)return;
       if(!available.length){
         img.hidden=true;
         img.removeAttribute('src');
         if(dl)dl.hidden=true;
-        if(status){status.textContent=toggle&&toggle.checked?'暂无带材料列表的图片':'暂无无材料列表的图片';status.hidden=false}
+        if(status){status.textContent=currentMaterials?'暂无带材料列表的图片':'暂无无材料列表的图片';status.hidden=false}
         return;
       }
-      var url='/tools/litematic_render/'+task.id+'/download/'+available[current];
+      var targetKind=currentView==='blueprint'?(currentMaterials?'blueprint':'blueprint_no_materials'):(currentMaterials?'paper':'paper_no_materials');
+      if(!available.includes(targetKind))targetKind=available[0];
+      var url='/tools/litematic_render/'+task.id+'/download/'+targetKind;
       img.hidden=false;
       img.src=url;
       if(dl){dl.hidden=false;dl.href=url}
@@ -177,14 +181,13 @@
     }
     function move(delta){
       if(!img||!available.length)return;
-      current=(current+delta+available.length)%available.length;
-      var url='/tools/litematic_render/'+task.id+'/download/'+available[current];
-      img.src=url;
-      if(dl)dl.href=url;
+      currentView=currentView==='paper'?'blueprint':'paper';
+      refreshAvailable();
+      showCurrent();
     }
     refreshAvailable();
     showCurrent();
-    if(toggle)toggle.addEventListener('change',function(){refreshAvailable();showCurrent()});
+    if(toggle)toggle.addEventListener('change',function(){currentMaterials=toggle.checked;refreshAvailable();showCurrent()});
     document.querySelector('.prev')?.addEventListener('click',function(){move(-1)});
     document.querySelector('.next')?.addEventListener('click',function(){move(1)});
 
@@ -192,7 +195,7 @@
     var modalImg=document.getElementById('image-modal-img');
     var closeButton=document.querySelector('.image-modal-close');
     var scale=1, offsetX=0, offsetY=0, pointers=new Map(), pinchDistance=0;
-    function renderTransform(){modalImg.style.transform='translate('+offsetX+'px,'+offsetY+'px) scale('+scale+')'}
+    function renderTransform(){modalImg.style.width=(img.naturalWidth*scale)+'px';modalImg.style.height='auto';modalImg.style.transform='translate('+offsetX+'px,'+offsetY+'px)'}
     function resetTransform(){scale=1;offsetX=0;offsetY=0;pinchDistance=0;pointers.clear();renderTransform()}
     function openModal(){
       if(!img||!modal||!modalImg)return;
