@@ -356,18 +356,40 @@ public final class OffscreenRenderer {
                     if (entity.getVehicle()!=null) vehicles.put(entity,entity.getVehicle());
                     entity.stopRiding();
                     entity.setId(nextEntityId--);
+                    // Litematica stores positions relative to the region.  The
+                    // recursive loader has decoded each entity's Pos already;
+                    // pin that translated position explicitly before adding it
+                    // to the client level, including nested passengers.
+                    Vec3 spawnPosition=entity.position();
+                    entity.setPos(spawnPosition.x,spawnPosition.y,spawnPosition.z);
                     entity.setDeltaMovement(Vec3.ZERO);
                     entity.setNoGravity(true);
                     client.level.addEntity(entity);
-                    frozenEntities.add(new FrozenEntity(entity,entity.position()));
+                    if (client.level.getEntity(entity.getId()) != entity) {
+                        throw new IllegalStateException("Client level did not register entity "
+                                + entity.getType() + " at " + entity.position());
+                    }
                     entityCount++;
                 }
                 for (Map.Entry<Entity,Entity> riding : vehicles.entrySet()) {
+                    // loadEntityRecursive attaches passengers before the root's
+                    // region translation is applied, which can leave riders at
+                    // a wildly displaced inherited position.  Align them with
+                    // the translated vehicle before restoring the relationship.
+                    riding.getKey().setPos(riding.getValue().position());
                     if (!riding.getKey().startRiding(riding.getValue(),true,false)) {
                         throw new IllegalStateException("Failed to restore riding relation for entity "
                                 + riding.getKey().getType());
                     }
+                    riding.getValue().positionRider(riding.getKey());
                     mountedEntityCount++;
+                }
+                for (Entity entity : entityTree) {
+                    frozenEntities.add(new FrozenEntity(entity,entity.position()));
+                    include(entity.getBoundingBox());
+                    System.out.printf("  - entity: type=%s id=%d pos=(%.2f,%.2f,%.2f) bounds=%s registered=true%n",
+                            entity.getType(),entity.getId(),entity.getX(),entity.getY(),entity.getZ(),
+                            entity.getBoundingBox());
                 }
             }
             Files.createDirectories(out);
@@ -495,7 +517,7 @@ public final class OffscreenRenderer {
                         Math.max(maxY - minY, maxZ - minZ));
                 halfSize = (float)(maxSpan * 0.6); // 10% margin on each side
             } else {
-                halfSize=(float)(Math.max(vertical,horizontal/aspect)*1.2);
+                halfSize=(float)Math.max(vertical,horizontal/aspect);
             }
             halfSize=Math.max(halfSize,1.0f);
             // Orthographic scale is independent of camera distance. Stay just
@@ -808,7 +830,7 @@ public final class OffscreenRenderer {
             // four times as many pixels per view as V76's fixed 540px cells.
             int cell = Math.max(540, captureWidth / 2);
             double scale = cell / 540.0;
-            int gap = (int)Math.round(42 * scale), margin = (int)Math.round(56 * scale);
+            int gap = adaptiveGap(cell * 4, 10), margin = (int)Math.round(56 * scale);
             int titleH = (int)Math.round(82 * scale), scaleBarH = (int)Math.round(74 * scale);
             int materialRows=Math.max(1,(materials.size()+3)/4);
             int materialsH=(int)Math.round((62+materialRows*42)*scale);
@@ -1019,7 +1041,8 @@ public final class OffscreenRenderer {
             int vh = composites[views[0].ordinal()].getHeight();
             int targetH = vh;            // preserve the full capture resolution
             int targetW = (int)Math.round(vw * (targetH / (double)vh));
-            int totalW = targetW * views.length;
+            int gap = adaptiveGap(targetW * views.length, views.length);
+            int totalW = targetW * views.length + gap * (views.length - 1);
             java.awt.image.BufferedImage canvas = new java.awt.image.BufferedImage(
                     totalW, targetH, java.awt.image.BufferedImage.TYPE_INT_ARGB);
             java.awt.Graphics2D g = canvas.createGraphics();
@@ -1030,12 +1053,17 @@ public final class OffscreenRenderer {
                     java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
             for (int i = 0; i < views.length; i++) {
                 BufferedImage src = viewsFor(outputStyle)[views[i].ordinal()];
-                g.drawImage(src, i * targetW, 0, targetW, targetH, null);
+                g.drawImage(src, i * (targetW + gap), 0, targetW, targetH, null);
             }
             g.dispose();
             Path file = out.resolve(outName);
             ImageIO.write(canvas, "PNG", file.toFile());
             System.out.println("WROTE COMPOSITE " + file + " (" + totalW + "x" + targetH + ")");
+        }
+
+        /** Scale inter-view whitespace with the source canvas and view count. */
+        private static int adaptiveGap(int canvasExtent, int viewCount) {
+            return Math.max(4, canvasExtent / Math.max(1, viewCount) / 20);
         }
 
         private BufferedImage[] viewsFor(Style outputStyle) {
