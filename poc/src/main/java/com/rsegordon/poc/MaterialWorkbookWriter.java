@@ -19,7 +19,7 @@ final class MaterialWorkbookWriter {
     private static final Path OWNER_TEMPLATE = Path.of(
             "/home/rsegordon/.hermes/cache/documents/doc_2079455ba095_刷怪塔材料清单.xlsx");
     private static final String SHEET = "xl/worksheets/sheet1.xml";
-    private static final String TABLE = "xl/tables/table1.xml";
+    private static final String STYLES = "xl/styles.xml";
     private static final Pattern ROW = Pattern.compile("<row r=\"(\\d+)\"[^>]*>.*?</row>");
 
     record Row(String name, long count) {}
@@ -44,9 +44,9 @@ final class MaterialWorkbookWriter {
                         if (SHEET.equals(source.getName())) {
                             String xml = new String(input.readAllBytes(), StandardCharsets.UTF_8);
                             result.write(fillSheet(xml, materials).getBytes(StandardCharsets.UTF_8));
-                        } else if (TABLE.equals(source.getName())) {
+                        } else if (STYLES.equals(source.getName())) {
                             String xml = new String(input.readAllBytes(), StandardCharsets.UTF_8);
-                            result.write(updateTable(xml).getBytes(StandardCharsets.UTF_8));
+                            result.write(alignTotalProgressBarsLeft(xml).getBytes(StandardCharsets.UTF_8));
                         } else input.transferTo(result);
                     }
                 }
@@ -56,10 +56,22 @@ final class MaterialWorkbookWriter {
         return output;
     }
 
+    private static String alignTotalProgressBarsLeft(String styles) throws IOException {
+        String left = "<xf fontId=\"10\" fillId=\"4\" borderId=\"0\" xfId=\"0\">"
+                + "<alignment vertical=\"center\" textRotation=\"0\" indent=\"0\" justifyLastLine=\"0\" shrinkToFit=\"0\"/>"
+                + "</xf>";
+        String centered = "<xf fontId=\"10\" fillId=\"4\" borderId=\"0\" xfId=\"0\">"
+                + "<alignment horizontal=\"center\" vertical=\"center\" textRotation=\"0\" indent=\"0\" justifyLastLine=\"0\" shrinkToFit=\"0\"/>"
+                + "</xf>";
+        if (!styles.contains(left) || !styles.contains(centered)) {
+            throw new IOException("Owner workbook is missing total progress bar styles");
+        }
+        String leftAligned = left.replace("<alignment ", "<alignment horizontal=\"left\" ");
+        String centeredLeftAligned = centered.replace("horizontal=\"center\"", "horizontal=\"left\"");
+        return styles.replace(left, leftAligned).replace(centered, centeredLeftAligned);
+    }
+
     private static String fillSheet(String template, List<Row> materials) throws IOException {
-        template = fillHeaders(template)
-                .replace("=COUNTIF(E2:E700,&quot;已完成&quot;)", "=COUNTIF(F2:F700,&quot;已完成&quot;)")
-                .replaceAll("<dataValidations>.*?</dataValidations>", "");
         Matcher matcher = ROW.matcher(template);
         StringBuilder output = new StringBuilder(template.length());
         boolean found = false;
@@ -78,18 +90,6 @@ final class MaterialWorkbookWriter {
         return output.toString();
     }
 
-    private static String fillHeaders(String template) throws IOException {
-        Matcher matcher = ROW.matcher(template);
-        if (!matcher.find() || !"1".equals(matcher.group(1))) {
-            throw new IOException("Owner workbook is missing its header row");
-        }
-        String row = matcher.group();
-        row = replaceCell(row, "E1", inlineTextCell("E1", "6", "已备数量"));
-        row = replaceCell(row, "F1", inlineTextCell("F1", "6", "状态"));
-        row = replaceCell(row, "G1", inlineTextCell("G1", "7", "备注"));
-        return matcher.replaceFirst(Matcher.quoteReplacement(row));
-    }
-
     private static String fillMaterialRow(String row, int number, Row material) throws IOException {
         String reference = "A" + number;
         row = replaceCell(row, reference, material == null
@@ -105,15 +105,12 @@ final class MaterialWorkbookWriter {
         row = replaceCell(row, reference, material == null
                 ? cell(reference, "12", "s", "") : formulaCell(reference, "12", "=B" + number + "/64/27"));
         row = replaceCell(row, "E" + number, material == null
-                ? cell("E" + number, "9", "s", "") : cell("E" + number, "13", null, "<v>0</v>"));
-        row = replaceCell(row, "F" + number, material == null
-                ? cell("F" + number, "9", "s", "")
-                : formulaStringCell("F" + number, "14", "=IF(E" + number + ">=B" + number
-                        + ",&quot;已完成&quot;,IF(E" + number + ">0,&quot;准备中&quot;,&quot;未开始&quot;))", "未开始"));
+                ? cell("E" + number, "13", "s", "") : inlineTextCell("E" + number, "13", "未开始"));
+        row = replaceCell(row, "F" + number, cell("F" + number, material == null ? "9" : "14", "s", ""));
         reference = "K" + number;
         row = replaceCell(row, reference, material == null
                 ? cell(reference, "21", "s", "")
-                : formulaCell(reference, "16", "=IF(F" + number + "=&quot;已完成&quot;,1,0)"));
+                : formulaCell(reference, "16", "=IF(E" + number + "=&quot;已完成&quot;,1,0)"));
         reference = "M" + number;
         return replaceCell(row, reference, material == null
                 ? cell(reference, "21", "s", "") : formulaCell(reference, "16", "=K" + number + "*B" + number));
@@ -130,20 +127,8 @@ final class MaterialWorkbookWriter {
         return cell(reference, style, null, "<f>" + formula + "</f><v></v>");
     }
 
-    private static String formulaStringCell(String reference, String style, String formula, String fallback) {
-        return cell(reference, style, "str", "<f>" + formula + "</f><v>" + escape(fallback) + "</v>");
-    }
-
     private static String inlineTextCell(String reference, String style, String value) {
         return cell(reference, style, "inlineStr", "<is><t>" + escape(value) + "</t></is>");
-    }
-
-    private static String updateTable(String table) {
-        return table.replace("ref=\"A1:F700\"", "ref=\"A1:G700\"")
-                .replace("<tableColumns count=\"6\">", "<tableColumns count=\"7\">")
-                .replace("<tableColumn id=\"5\" name=\"状态\"/><tableColumn id=\"6\" name=\"备注\"/>",
-                        "<tableColumn id=\"5\" name=\"已备数量\"/><tableColumn id=\"6\" name=\"状态\"/>"
-                                + "<tableColumn id=\"7\" name=\"备注\"/>");
     }
 
     private static String cell(String reference, String style, String type, String content) {

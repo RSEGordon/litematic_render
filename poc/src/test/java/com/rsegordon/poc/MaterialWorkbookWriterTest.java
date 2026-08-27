@@ -28,7 +28,7 @@ class MaterialWorkbookWriterTest {
                 var entry = entries.nextElement();
                 assertTrue(actual.getEntry(entry.getName()) != null, entry.getName());
                 if (!entry.isDirectory() && !entry.getName().equals("xl/worksheets/sheet1.xml")
-                        && !entry.getName().equals("xl/tables/table1.xml")) {
+                        && !entry.getName().equals("xl/styles.xml")) {
                     assertArrayEquals(expected.getInputStream(entry).readAllBytes(),
                             actual.getInputStream(actual.getEntry(entry.getName())).readAllBytes(), entry.getName());
                 }
@@ -38,21 +38,25 @@ class MaterialWorkbookWriterTest {
             assertTrue(sheet.contains("玻璃 &amp; 木板"));
             assertTrue(sheet.contains("<c r=\"B2\" s=\"11\"><v>1728</v></c>"));
             assertTrue(sheet.contains("<c r=\"C2\" s=\"12\"><f>=B2/64</f><v></v></c>"));
-            assertTrue(sheet.contains("<c r=\"E1\" s=\"6\" t=\"inlineStr\"><is><t>已备数量</t></is></c>"));
-            assertTrue(sheet.contains("<c r=\"F1\" s=\"6\" t=\"inlineStr\"><is><t>状态</t></is></c>"));
-            assertTrue(sheet.contains("<c r=\"E2\" s=\"13\"><v>0</v></c>"));
-            assertTrue(sheet.contains("<c r=\"F2\" s=\"14\" t=\"str\"><f>=IF(E2>=B2,&quot;已完成&quot;,IF(E2>0,&quot;准备中&quot;,&quot;未开始&quot;))</f><v>未开始</v></c>"));
-            assertTrue(sheet.contains("<f>=IF(F2=&quot;已完成&quot;,1,0)</f>"));
+            assertTrue(sheet.contains("<c r=\"E2\" s=\"13\" t=\"inlineStr\"><is><t>未开始</t></is></c>"));
+            assertTrue(sheet.contains("<c r=\"F2\" s=\"14\" t=\"s\"></c>"));
+            assertTrue(!sheet.contains("<c r=\"E2\" s=\"13\" t=\"inlineStr\"><f>"));
+            assertTrue(sheet.contains("<f>=IF(E2=&quot;已完成&quot;,1,0)</f>"));
             assertTrue(sheet.contains("<c r=\"A4\" s=\"22\" t=\"s\"></c>"));
             assertTrue(sheet.contains("<f>=SUM(B2:B76)</f>"));
-            assertTrue(sheet.contains("<f>=COUNTIF(F2:F700,&quot;已完成&quot;)/COUNTA(E2:E700)</f>"));
+            assertTrue(sheet.contains("<f>=COUNTIF(E2:E700,&quot;已完成&quot;)/COUNTA(E2:E700)</f>"));
             assertTrue(sheet.contains("<f>=SUM(M2:M700)/I2</f>"));
             assertTrue(sheet.contains("<tablePart r:id=\"rId0\"/>"));
-            assertTrue(!sheet.contains("<dataValidations>"));
+            assertTrue(sheet.contains("<dataValidations>"));
             String table = new String(actual.getInputStream(actual.getEntry("xl/tables/table1.xml")).readAllBytes(), StandardCharsets.UTF_8);
-            assertTrue(table.contains("ref=\"A1:G700\""));
-            assertTrue(table.contains("<tableColumns count=\"7\">"));
-            assertTrue(table.contains("<tableColumn id=\"5\" name=\"已备数量\"/>"));
+            assertTrue(table.contains("ref=\"A1:F700\""));
+            assertTrue(table.contains("<tableColumns count=\"6\">"));
+            assertTrue(table.contains("<tableColumn id=\"5\" name=\"状态\"/>"));
+            assertTrue(table.contains("<tableColumn id=\"6\" name=\"备注\"/>"));
+            assertTrue(!table.contains("已备数量"));
+            String styles = new String(actual.getInputStream(actual.getEntry("xl/styles.xml")).readAllBytes(), StandardCharsets.UTF_8);
+            assertEquals(2, styles.split("horizontal=\"left\"", -1).length - 1);
+            assertTrue(styles.contains("<alignment horizontal=\"left\" vertical=\"center\" textRotation=\"0\""));
         }
     }
 }
