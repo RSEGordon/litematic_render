@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import os
 import re
 import shlex
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 import zipfile
 from pathlib import Path
@@ -27,6 +29,48 @@ _lock = threading.RLock()
 _render_lock = threading.Lock()
 bp = Blueprint("litematic_render", __name__, template_folder="templates")
 MAX_RENDER_DIMENSION = 80
+UPDATE_RETRIES = 3
+UPDATE_RETRY_DELAY = 0.5
+
+LOG_TRANSLATIONS = {
+    "WROTE COMPOSITE": "已生成合成图", "WROTE MATERIAL WORKBOOK": "已生成材料清单",
+    "WROTE OUTPUT ARCHIVE": "已打包输出", "WROTE": "已写出",
+    "LITEMATIC_RENDER_DONE": "渲染完成", "BUILD SUCCESSFUL": "构建成功",
+    "BUILD FAILED": "构建失败", "Stopping server": "停止服务",
+    "Saving players": "保存玩家数据", "Saving chunks": "保存区块",
+    "Saving worlds": "保存世界", "Saving dimensions": "保存维度",
+    "RenderBot lost connection": "渲染机器人断开连接", "Loading mods": "加载模组",
+    "loaded litematic": "已读取投影", "rendering overview": "生成概览图",
+    "rendering paper": "生成彩图", "Starting Minecraft": "启动 Minecraft",
+    "Litematica loaded": "Litematica 模组已加载", "Applying mixin": "应用 mixin",
+    "Initializing": "初始化中", "TOTAL_BLOCKS": "总方块数", "REGION": "区域",
+    "STEP": "步骤", "elapsed": "已用时", "rendering": "渲染中",
+    "Loading": "加载中", "loaded": "已加载", "done": "完成", "failed": "失败",
+}
+
+
+def _log_status(level, message, *args):
+    """Write render state transitions to the dedicated Flask log."""
+    try:
+        LITEMATIC_DIR.mkdir(parents=True, exist_ok=True)
+        logger = logging.getLogger("litematic_render")
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        log_path = LITEMATIC_DIR / "flask.log"
+        handler = next((item for item in logger.handlers
+                        if isinstance(item, logging.FileHandler)
+                        and Path(item.baseFilename) == log_path), None)
+        if handler is None:
+            for old_handler in list(logger.handlers):
+                old_handler.close()
+                logger.removeHandler(old_handler)
+            handler = logging.FileHandler(log_path, encoding="utf-8")
+            handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+            logger.addHandler(handler)
+        logger.log(level, message, *args)
+    except Exception:
+        print("litematic_render: failed to write flask.log", file=sys.stderr)
+        traceback.print_exc()
 
 
 def _page_nav(page, extra_right=""):
@@ -174,13 +218,38 @@ def _task(task_id):
 
 
 def _update(task_id, **changes):
-    with _lock:
-        tasks = _read_tasks()
-        for item in tasks:
-            if item["id"] == task_id:
-                item.update(changes)
-                break
-        _write_tasks(tasks)
+    for attempt in range(1, UPDATE_RETRIES + 1):
+        try:
+            with _lock:
+                tasks = _read_tasks()
+                for item in tasks:
+                    if item["id"] == task_id:
+                        item.update(changes)
+                        break
+                else:
+                    raise KeyError(f"task not found: {task_id}")
+                _write_tasks(tasks)
+            _log_status(logging.INFO, "[%s] status change: %s", task_id, changes)
+            return
+        except Exception:
+            _log_status(logging.ERROR, "[%s] _update attempt %d/%d failed\n%s",
+                        task_id, attempt, UPDATE_RETRIES, traceback.format_exc())
+            traceback.print_exc()
+            if attempt < UPDATE_RETRIES:
+                time.sleep(UPDATE_RETRY_DELAY)
+    raise RuntimeError(f"failed to update task {task_id} after {UPDATE_RETRIES} attempts")
+
+
+def _force_update(task_id, **changes):
+    """Last-resort tasks.json rewrite used after normal state updates fail."""
+    tasks = json.loads(TASKS_FILE.read_text(encoding="utf-8"))
+    for item in tasks:
+        if item["id"] == task_id:
+            item.update(changes)
+            _write_tasks(tasks)
+            _log_status(logging.WARNING, "[%s] force-updated status: %s", task_id, changes)
+            return
+    raise KeyError(f"task not found: {task_id}")
 
 
 def _progress(task):
@@ -200,6 +269,34 @@ def _with_progress(task):
     result = dict(task)
     result["progress"] = _progress(task)
     return result
+
+
+def _translate_log_line(line):
+    line = re.sub(r'^\[(\d{2}:\d{2}:\d{2})\]\s*\[Render thread/(\w+)\]\s*\(Minecraft\)\s*(?:\[STDOUT\]:\s*)?', r'\1 [\2] ', line)
+    line = re.sub(r'^\[(\d{2}:\d{2}:\d{2})\]\s*\[([^]/]+)/(\w+)\]\s*\(Minecraft\)\s*', r'\1 [\3] ', line)
+    line = line.replace("(Minecraft)", "")
+    for english, chinese in LOG_TRANSLATIONS.items():
+        line = line.replace(english, chinese)
+    return line.strip()
+
+
+def _progress_from_log(lines, status=None):
+    if status == "complete":
+        return 100
+    steps = [int(value) for line in lines for value in re.findall(r"\[STEP\s+([1-9])(?:/9)?\]", line)]
+    return round(max(steps) * 100 / 9) if steps else 0
+
+
+def _current_step(lines, status=None):
+    if status == "complete":
+        return "渲染完成"
+    if status == "failed":
+        return "渲染失败"
+    for line in reversed(lines):
+        translated = _translate_log_line(line)
+        if any(marker in translated for marker in ("步骤", "生成", "构建", "加载", "渲染")):
+            return translated[-80:]
+    return "排队中" if status == "queued" else "渲染中"
 
 
 def _read_nbt(path):
@@ -300,8 +397,10 @@ def _run(task_id):
         # be serialized even if several browser uploads arrive together.
         with _render_lock, log_file.open("w", encoding="utf-8") as log:
             _update(task_id, status="rendering", started_at=int(time.time()))
+            _log_status(logging.INFO, "[%s] rendering started", task_id)
             result = subprocess.run(command, cwd=POC_ROOT, env=env, stdout=log,
                                     stderr=subprocess.STDOUT, timeout=1800, check=False)
+        _log_status(logging.INFO, "[%s] subprocess returned %s", task_id, result.returncode)
         workbook = next(output.glob("*_备货清单.xlsx"), None)
         output_prefix = re.sub(r"(?i)\.litematic$", "", task["filename"])
         output_prefix = re.sub(r'[\\/:*?"<>|]', "_", output_prefix).strip() or "litematic"
@@ -315,12 +414,37 @@ def _run(task_id):
             "log": log_file.name,
         }
         complete = result.returncode == 0 and all(outputs[k] for k in ("paper", "blueprint", "workbook"))
-        _update(task_id, status="complete" if complete else "failed", outputs=outputs,
-                error=None if complete else f"渲染退出码 {result.returncode}，请查看日志",
-                finished_at=int(time.time()))
+        final_changes = {
+            "status": "complete" if complete else "failed", "outputs": outputs,
+            "error": None if complete else f"渲染退出码 {result.returncode}，请查看日志",
+            "finished_at": int(time.time()),
+        }
+        try:
+            _update(task_id, **final_changes)
+        except Exception:
+            _log_status(logging.ERROR, "[%s] normal final update failed; forcing rewrite\n%s",
+                        task_id, traceback.format_exc())
+            if complete:
+                _force_update(task_id, **final_changes)
+            else:
+                raise
     except Exception as error:
-        _update(task_id, status="failed", error=str(error), finished_at=int(time.time()),
-                outputs={"log": log_file.name if log_file.exists() else None})
+        traceback.print_exc()
+        _log_status(logging.ERROR, "[%s] _run exception\n%s", task_id, traceback.format_exc())
+        failure = {"status": "failed", "error": str(error), "finished_at": int(time.time()),
+                   "outputs": {"log": log_file.name if log_file.exists() else None}}
+        try:
+            _update(task_id, **failure)
+        except Exception:
+            traceback.print_exc()
+            _log_status(logging.ERROR, "[%s] final failure update failed\n%s",
+                        task_id, traceback.format_exc())
+            try:
+                _force_update(task_id, **failure)
+            except Exception:
+                traceback.print_exc()
+                _log_status(logging.CRITICAL, "[%s] force failure update failed\n%s",
+                            task_id, traceback.format_exc())
 
 
 @bp.get("/tools/litematic_render/")
@@ -332,6 +456,12 @@ def task_list():
         thumbnail = Path(task.get("output_dir", "")) / "mcoo_axon_x_pos_z_pos_paper.png"
         if thumbnail.is_file():
             task.setdefault("outputs", {})["thumbnail"] = thumbnail.name
+        # V126: 卡片显示作者 (跟详情页一致) + 友好大小
+        try:
+            meta = _read_litematic_metadata(task.get("source_path", ""))
+            task["metadata"] = meta
+        except Exception:
+            task["metadata"] = {"name": task.get("filename", ""), "dimensions": "—", "author": "—", "version": "—", "metadata_error": None}
     body = render_template("litematic_tasks_body.html", tasks=tasks, nav=_page_nav("/tools/litematic_render/"))
     return body
 
@@ -398,11 +528,33 @@ def task_detail(task_id):
 
 
 @bp.get("/api/tools/litematic_render/<task_id>")
+@bp.get("/tools/litematic_render/<task_id>/status")
 def task_status(task_id):
     task = _task(task_id)
     if not task:
         abort(404)
     return jsonify(_with_progress(task))
+
+
+@bp.get("/tools/litematic_render/<task_id>/log_tail")
+def log_tail(task_id):
+    task = _task(task_id)
+    if not task:
+        abort(404)
+    log_path = Path(task["output_dir"]) / "render.log"
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-100:]
+    except FileNotFoundError:
+        lines = []
+    except OSError:
+        _log_status(logging.ERROR, "[%s] failed reading render.log\n%s",
+                    task_id, traceback.format_exc())
+        return jsonify({"status": task.get("status"), "lines": [], "progress": 0,
+                        "step": "读取日志失败"})
+    return jsonify({"status": task.get("status"),
+                    "lines": [_translate_log_line(line) for line in lines[-20:]],
+                    "progress": _progress_from_log(lines, task.get("status")),
+                    "step": _current_step(lines, task.get("status"))})
 
 
 @bp.post("/api/tools/litematic_render/<task_id>/retry")
