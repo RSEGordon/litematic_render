@@ -1,8 +1,9 @@
 {
   "required": true,
   "package": "com.rsegordon.poc.mixin",
-  "compatibilityLevel": "JAVA_21",
+  "compatibilityLevel": "JAVA_25",
   "client": [
+    "GameRendererMixin",
     "WorldRendererMixin"
   ],
   "injectors": {

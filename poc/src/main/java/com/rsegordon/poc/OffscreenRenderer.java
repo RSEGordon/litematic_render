@@ -7,243 +7,310 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
-import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.blaze3d.systems.VertexSorter;
+import com.mojang.blaze3d.platform.NativeImage;
 import org.joml.Matrix4f;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
-import net.minecraft.block.entity.BlockEntity;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.gui.screen.TitleScreen;
-import net.minecraft.client.texture.NativeImage;
-import net.minecraft.client.util.ScreenshotRecorder;
-import net.minecraft.entity.Entity;
-import net.minecraft.entity.EntityType;
-import net.minecraft.nbt.NbtCompound;
-import net.minecraft.nbt.NbtElement;
-import net.minecraft.nbt.NbtHelper;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.Screenshot;
+import net.minecraft.client.gui.screens.TitleScreen;
+import net.minecraft.client.renderer.state.level.CameraRenderState;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtIo;
-import net.minecraft.nbt.NbtList;
-import net.minecraft.nbt.NbtSizeTracker;
-import net.minecraft.registry.Registries;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
-import net.minecraft.util.math.Vec3d;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.NbtAccounter;
+import net.minecraft.nbt.NbtUtils;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntitySpawnReason;
+import net.minecraft.world.entity.EntitySpawnRequest;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 
 /** Minimal proof: populate a ClientWorld, let the normal WorldRenderer draw it, copy its framebuffer. */
 public final class OffscreenRenderer {
+    /** 32 chunks covers a 100-block structure plus the most distant axonometric camera. */
+    private static final int RENDER_DISTANCE_CHUNKS = 32;
     private static Job job;
     private static boolean worldStartRequested;
+    private static int worldSettleTicks;
     private static ViewState activeView;
     static {
         ClientTickEvents.END_CLIENT_TICK.register(OffscreenRenderer::tick);
-        WorldRenderEvents.START.register(context -> {
-            if (activeView == null) return;
-            MinecraftClient client = MinecraftClient.getInstance();
-            float aspect = (float) client.getWindow().getFramebufferWidth()
-                    / client.getWindow().getFramebufferHeight();
-            Matrix4f projection = context.projectionMatrix().setOrtho(
-                    -activeView.halfSize * aspect, activeView.halfSize * aspect,
-                    -activeView.halfSize, activeView.halfSize, 0.05f, activeView.farPlane);
-            RenderSystem.setProjectionMatrix(projection, VertexSorter.BY_DISTANCE);
-        });
     }
     private OffscreenRenderer() {}
 
     public static void arm(String input, String output) { job = new Job(Path.of(input), Path.of(output)); }
 
-    private static void tick(MinecraftClient client) {
+    /** Called after vanilla extracts the camera, but before 26.2 builds its culling frustum. */
+    public static void applyProjection(CameraRenderState camera) {
+        if (activeView == null) return;
+        Minecraft client = Minecraft.getInstance();
+        float aspect = (float) client.getWindow().getWidth() / client.getWindow().getHeight();
+        camera.projectionMatrix.setOrtho(
+                -activeView.halfSize * aspect, activeView.halfSize * aspect,
+                -activeView.halfSize, activeView.halfSize,
+                activeView.farPlane, 0.05f);
+        camera.depthFar = activeView.farPlane;
+    }
+
+    private static void tick(Minecraft client) {
         if (job == null) return;
-        if (client.world == null) {
-            if (client.getOverlay() != null) return;
+        if (client.level == null) {
+            if (!client.isGameLoadFinished() || client.gui.overlay() != null) return;
             if (!worldStartRequested) {
                 worldStartRequested = true;
+                client.options.renderDistance().set(RENDER_DISTANCE_CHUNKS);
                 System.out.println("LITEMATIC_RENDER_STARTING_WORLD World");
-                client.createIntegratedServerLoader().start("World", () -> client.setScreen(new TitleScreen()));
+                client.createWorldOpenFlows().openWorld("World", () -> client.setScreenAndShow(new TitleScreen()));
             }
             return;
         }
         if (client.player == null) return;
         try {
+            // The player object appears before the initial client chunks have
+            // arrived. Writing into missing chunks silently fails and leaves
+            // block entities attached to void_air, so wait for the 32-chunk
+            // view-distance update and initial chunk packets to settle.
+            if (!job.loaded && worldSettleTicks++ < 60) return;
             if (!job.loaded) { job.load(client); return; }
             job.freezeEntities();
             View view = View.values()[Math.min(job.view, View.values().length - 1)];
             activeView = job.cameraFor(view, client);
-            client.player.setPosition(activeView.position.x,
-                    activeView.position.y - client.player.getStandingEyeHeight(), activeView.position.z);
-            client.player.setYaw(view.yaw); client.player.setPitch(view.pitch);
+            client.player.setPos(activeView.position.x,
+                    activeView.position.y - client.player.getEyeHeight(), activeView.position.z);
+            client.player.setYRot(view.yaw); client.player.setXRot(view.pitch);
             job.wait++;
             if (job.blackPass == null) {
+                if (job.screenshotPending) return;
                 if (job.wait < 35) return;
-                job.blackPass=ScreenshotRecorder.takeScreenshot(client.getFramebuffer());
-                BackgroundPass.setWhite(true);
-                job.wait=0;
+                job.requestBlackPass(client);
                 return;
             }
+            if (job.screenshotPending) return;
             if (job.wait < 5) return;
-            job.capture(client, view);
-            BackgroundPass.setWhite(false);
-            job.view++; job.wait = 0;
-            if (job.view == View.values().length) {
-                job.assembleComposites();
-                System.out.println("LITEMATIC_RENDER_DONE " + job.out);
-                client.scheduleStop(); job = null; activeView = null; worldStartRequested = false;
-            }
-        } catch (Exception error) { error.printStackTrace(); client.scheduleStop(); job = null; activeView = null; }
+            job.requestCapture(client, view);
+        } catch (Exception error) { error.printStackTrace(); client.stop(); job = null; activeView = null; worldSettleTicks = 0; }
     }
 
-    /** 7 views for V64:
-     *  - TOP/FRONT/SIDE: cardinal 3-view orthographic
-     *  - ISO_135: standard iso at yaw=135 pitch=30
-     *  - ANGLE_45/225/315: 3 more axonometric views at yaw 45/225/315 pitch=30
-     *    so the 4-angle strip shows the model from 4 cardinal iso corners
+    /**
+     * V76 engineering views.  The yaw/pitch values are Minecraft camera angles;
+     * cameraFor() converts them to a look vector with sin/cos.  Cardinal names
+     * describe the observation station, e.g. FRONT_X_POS is viewed from +X.
      */
     private enum View {
-        TOP(0, 90), FRONT(180, 0), SIDE(90, 0),
-        ISO_135(135, 30), ANGLE_45(45, 30), ANGLE_225(225, 30), ANGLE_315(315, 30);
+        FRONT_X_POS(90, 0), LEFT_Z_NEG(0, 0), RIGHT_Z_POS(180, 0),
+        BACK_X_NEG(270, 0), TOP_X_UP(90, 90), BOTTOM_X_UP(90, -90),
+        AXON_X_POS_Z_POS(135, 30), AXON_X_NEG_Z_POS(225, 30),
+        AXON_X_POS_Z_NEG(45, 30), AXON_X_NEG_Z_NEG(315, 30);
         final float yaw,pitch;
         View(float yaw,float pitch) { this.yaw=yaw;this.pitch=pitch; }
     }
 
-    private record ViewState(Vec3d position, float halfSize, float farPlane) {}
+    private record ViewState(Vec3 position, float halfSize, float farPlane) {}
 
     private static final class Job {
-        final Path input, out; boolean loaded; int wait, view; NativeImage blackPass;
+        final Path input, out; boolean loaded, screenshotPending; int wait, view; NativeImage blackPass;
         double minX, minY, minZ, maxX, maxY, maxZ;
         final List<FrozenEntity> frozenEntities=new ArrayList<>();
+        int nextEntityId = -1000;
         // Per-view saved native image (post alpha matting) for composite assembly
         final NativeImage[] composites = new NativeImage[View.values().length];
         Job(Path input, Path out) { this.input=input; this.out=out; }
 
-        void load(MinecraftClient client) throws Exception {
-            NbtCompound root = NbtIo.readCompressed(input, NbtSizeTracker.ofUnlimitedBytes());
-            NbtCompound regions = root.getCompound("Regions");
-            if (regions.getKeys().isEmpty()) throw new IllegalArgumentException("No litematic regions");
-            NbtCompound region = regions.getCompound(regions.getKeys().iterator().next());
-            NbtCompound size = region.getCompound("Size");
-            int sizeX=size.getInt("x"),sizeY=size.getInt("y"),sizeZ=size.getInt("z");
+        void load(Minecraft client) throws Exception {
+            CompoundTag root = NbtIo.readCompressed(input, NbtAccounter.unlimitedHeap());
+            CompoundTag regions = root.getCompoundOrEmpty("Regions");
+            if (regions.keySet().isEmpty()) throw new IllegalArgumentException("No litematic regions");
+            CompoundTag region = regions.getCompoundOrEmpty(regions.keySet().iterator().next());
+            CompoundTag size = region.getCompoundOrEmpty("Size");
+            int sizeX=size.getIntOr("x",0),sizeY=size.getIntOr("y",0),sizeZ=size.getIntOr("z",0);
             int sx=Math.abs(sizeX),sy=Math.abs(sizeY),sz=Math.abs(sizeZ);
-            minX=0; minY=100; minZ=0; maxX=sx; maxY=100+sy; maxZ=sz;
-            NbtList paletteNbt = region.getList("BlockStatePalette", NbtElement.COMPOUND_TYPE);
+            // Keep the render volume above normal terrain while retaining at
+            // least 32 blocks of headroom inside the build-height limit.
+            int originY=Math.max(160,client.level.getMaxY()-sy-64);
+            minX=0; minY=originY; minZ=0; maxX=sx; maxY=originY+sy; maxZ=sz;
+            ListTag paletteNbt = region.getListOrEmpty("BlockStatePalette");
             List<BlockState> palette = new ArrayList<>();
-            for (int i=0;i<paletteNbt.size();i++) palette.add(NbtHelper.toBlockState(Registries.BLOCK.getReadOnlyWrapper(), paletteNbt.getCompound(i)));
-            long[] packed=region.getLongArray("BlockStates"); int bits=Math.max(2, 32-Integer.numberOfLeadingZeros(palette.size()-1)); long mask=(1L<<bits)-1;
-            BlockPos origin=new BlockPos(0,100,0);
-            BlockState air = Blocks.AIR.getDefaultState();
-            for (int y=client.world.getBottomY();y<origin.getY();y++) {
+            for (int i=0;i<paletteNbt.size();i++) palette.add(NbtUtils.readBlockState(BuiltInRegistries.BLOCK, paletteNbt.getCompoundOrEmpty(i)));
+            long[] packed=region.getLongArray("BlockStates").orElseThrow(); int bits=Math.max(2, 32-Integer.numberOfLeadingZeros(palette.size()-1)); long mask=(1L<<bits)-1;
+            BlockPos origin=new BlockPos(0,originY,0);
+            BlockState air = Blocks.AIR.defaultBlockState();
+            for (int y=client.level.getMinY();y<origin.getY();y++) {
                 for (int z=-32;z<=32;z++) for (int x=-32;x<=32;x++) {
-                    client.world.setBlockState(new BlockPos(x,y,z),air,19);
+                    client.level.setBlock(new BlockPos(x,y,z),air,19,512);
                 }
             }
             for (int y=0;y<sy;y++) for (int z=0;z<sz;z++) for (int x=0;x<sx;x++) {
                 int n=(y*sz+z)*sx+x, start=n*bits, word=start>>>6, shift=start&63;
                 long value=packed[word]>>>shift; if (shift+bits>64) value|=packed[word+1]<<(64-shift);
-                client.world.setBlockState(origin.add(x,y,z), palette.get((int)(value&mask)), 19);
+                client.level.setBlock(origin.offset(x,y,z), palette.get((int)(value&mask)), 19,512);
             }
-            NbtList tiles=region.getList("TileEntities", NbtElement.COMPOUND_TYPE);
+            ListTag tiles=region.getListOrEmpty("TileEntities");
             for (int i=0;i<tiles.size();i++) {
-                NbtCompound tag=tiles.getCompound(i).copy(); BlockPos p=origin.add(tag.getInt("x"),tag.getInt("y"),tag.getInt("z"));
+                CompoundTag tag=tiles.getCompoundOrEmpty(i).copy(); BlockPos p=origin.offset(tag.getIntOr("x",0),tag.getIntOr("y",0),tag.getIntOr("z",0));
                 tag.putInt("x",p.getX());tag.putInt("y",p.getY());tag.putInt("z",p.getZ());
-                BlockEntity be=BlockEntity.createFromNbt(p,client.world.getBlockState(p),tag,client.world.getRegistryManager());
-                if (be!=null) client.world.addBlockEntity(be);
+                BlockEntity be=BlockEntity.loadStatic(p,client.level.getBlockState(p),tag,client.level.registryAccess());
+                if (be!=null) client.level.setBlockEntity(be);
             }
-            NbtList entities=region.getList("Entities", NbtElement.COMPOUND_TYPE);
-            Vec3d entityOrigin=new Vec3d(
+            ListTag entities=region.getListOrEmpty("Entities");
+            Vec3 entityOrigin=new Vec3(
                     origin.getX()+(sizeX<0?sx-1:0),
                     origin.getY()+(sizeY<0?sy-1:0),
                     origin.getZ()+(sizeZ<0?sz-1:0));
             int entityCount=0;
             for (int i=0;i<entities.size();i++) {
                 final int entityIndex=i;
-                NbtCompound tag=entities.getCompound(i).copy();
-                NbtList nbtPos=tag.getList("Pos",NbtElement.DOUBLE_TYPE);
-                Entity rootEntity=EntityType.loadEntityWithPassengers(tag,client.world,entity -> {
-                    entity.setUuid(UUID.randomUUID());
-                    entity.refreshPositionAfterTeleport(entity.getPos().add(entityOrigin));
+                CompoundTag tag=entities.getCompoundOrEmpty(i).copy();
+                Entity rootEntity=EntityType.loadEntityRecursive(tag,client.level,
+                        new EntitySpawnRequest(EntitySpawnReason.LOAD,false), entity -> {
+                    entity.setUUID(UUID.randomUUID());
+                    entity.setPos(entity.position().add(entityOrigin));
                     return entity;
                 });
                 if (rootEntity==null) continue;
-                for (Entity entity : rootEntity.streamSelfAndPassengers().toList()) {
-                    entity.setVelocity(Vec3d.ZERO);
+                for (Entity entity : rootEntity.getSelfAndPassengers().toList()) {
+                    entity.setId(nextEntityId--);
+                    entity.setDeltaMovement(Vec3.ZERO);
                     entity.setNoGravity(true);
-                    client.world.addEntity(entity);
+                    client.level.addEntity(entity);
                     include(entity.getBoundingBox());
-                    frozenEntities.add(new FrozenEntity(entity,entity.getPos()));
+                    frozenEntities.add(new FrozenEntity(entity,entity.position()));
                     entityCount++;
                 }
             }
-            Files.createDirectories(out); client.options.hudHidden=true; client.options.getFov().setValue(50);
-            client.worldRenderer.reload(); loaded=true;
+            Files.createDirectories(out);
+            if (!client.gui.hud.isHidden()) client.gui.hud.toggle();
+            client.options.fov().set(50);
+            // Use Minecraft's supported brightness control while the actual
+            // framebuffer is rendered. This exposes face and texture contrast
+            // to the edge detector instead of trying to brighten an encoded PNG.
+            client.options.gamma().set(1.0);
+            client.options.renderDistance().set(RENDER_DISTANCE_CHUNKS);
+            // Recreate section geometry with the safe 26.2 path. Unlike
+            // resetLevelRenderData(), this waits for the occlusion graph reset
+            // before the next extraction and includes newly non-empty sections.
+            client.levelRenderer.invalidateCompiledGeometry(
+                    client.level,client.options,client.gameRenderer.mainCamera(),client.getBlockColors());
+            loaded=true;
             System.out.printf("Loaded %dx%dx%d palette=%d tiles=%d entities=%d bounds=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]%n",
                     sx,sy,sz,palette.size(),tiles.size(),entityCount,minX,minY,minZ,maxX,maxY,maxZ);
         }
 
-        void include(Box box) {
+        void include(AABB box) {
             minX=Math.min(minX,box.minX); minY=Math.min(minY,box.minY); minZ=Math.min(minZ,box.minZ);
             maxX=Math.max(maxX,box.maxX); maxY=Math.max(maxY,box.maxY); maxZ=Math.max(maxZ,box.maxZ);
         }
 
         void freezeEntities() {
             for (FrozenEntity frozen : frozenEntities) {
-                frozen.entity.setVelocity(Vec3d.ZERO);
-                frozen.entity.refreshPositionAfterTeleport(frozen.position);
+                frozen.entity.setDeltaMovement(Vec3.ZERO);
+                frozen.entity.setPos(frozen.position);
             }
         }
 
-        ViewState cameraFor(View view, MinecraftClient client) {
-            Vec3d center=new Vec3d((minX+maxX)/2.0,(minY+maxY)/2.0,(minZ+maxZ)/2.0);
+        ViewState cameraFor(View view, Minecraft client) {
+            Vec3 center=new Vec3((minX+maxX)/2.0,(minY+maxY)/2.0,(minZ+maxZ)/2.0);
             double yaw=Math.toRadians(view.yaw), pitch=Math.toRadians(view.pitch);
-            Vec3d forward=new Vec3d(-Math.sin(yaw)*Math.cos(pitch),-Math.sin(pitch),Math.cos(yaw)*Math.cos(pitch));
-            Vec3d right=new Vec3d(Math.cos(yaw),0,Math.sin(yaw)).normalize();
-            Vec3d up=forward.crossProduct(right).normalize();
+            Vec3 forward=new Vec3(-Math.sin(yaw)*Math.cos(pitch),-Math.sin(pitch),Math.cos(yaw)*Math.cos(pitch));
+            Vec3 right=new Vec3(Math.cos(yaw),0,Math.sin(yaw)).normalize();
+            Vec3 up=forward.cross(right).normalize();
             double horizontal=0, vertical=0, radius=0;
             for (double x : new double[]{minX,maxX}) for (double y : new double[]{minY,maxY})
                 for (double z : new double[]{minZ,maxZ}) {
-                    Vec3d delta=new Vec3d(x,y,z).subtract(center);
-                    horizontal=Math.max(horizontal,Math.abs(delta.dotProduct(right)));
-                    vertical=Math.max(vertical,Math.abs(delta.dotProduct(up)));
+                    Vec3 delta=new Vec3(x,y,z).subtract(center);
+                    horizontal=Math.max(horizontal,Math.abs(delta.dot(right)));
+                    vertical=Math.max(vertical,Math.abs(delta.dot(up)));
                     radius=Math.max(radius,delta.length());
                 }
-            float aspect=(float)client.getWindow().getFramebufferWidth()/client.getWindow().getFramebufferHeight();
-            float halfSize=(float)(Math.max(vertical,horizontal/aspect)*1.2);
+            float aspect=(float)client.getWindow().getWidth()/client.getWindow().getHeight();
+            float halfSize;
+            if (isPrincipalView(view)) {
+                // All six principal views use one drawing scale.
+                // Individually fitting each view makes the sheet look aligned,
+                // but violates length/height/depth correspondence in pixels.
+                double maxSpan = Math.max(maxX - minX,
+                        Math.max(maxY - minY, maxZ - minZ));
+                halfSize = (float)(maxSpan * 0.6); // 10% margin on each side
+            } else {
+                halfSize=(float)(Math.max(vertical,horizontal/aspect)*1.2);
+            }
             halfSize=Math.max(halfSize,1.0f);
             double distance=radius+Math.max(8.0,halfSize*1.2);
-            Vec3d position=center.subtract(forward.multiply(distance));
+            Vec3 position=center.subtract(forward.scale(distance));
             float farPlane=(float)Math.max(256.0,distance+radius+32.0);
             return new ViewState(position,halfSize,farPlane);
         }
 
-        void capture(MinecraftClient client, View view) throws Exception {
+        private static boolean isPrincipalView(View view) {
+            return view == View.FRONT_X_POS || view == View.LEFT_Z_NEG ||
+                    view == View.RIGHT_Z_POS || view == View.BACK_X_NEG ||
+                    view == View.TOP_X_UP || view == View.BOTTOM_X_UP;
+        }
+
+        void requestBlackPass(Minecraft client) {
+            screenshotPending = true;
+            Screenshot.takeScreenshot(client.gameRenderer.mainRenderTarget(), image -> {
+                blackPass = image;
+                BackgroundPass.setWhite(true);
+                wait = 0;
+                screenshotPending = false;
+            });
+        }
+
+        void requestCapture(Minecraft client, View view) {
             // We capture the white-background pass second; the black-background
             // pass was captured at the start of this view. matte(black, white)
             // derives per-pixel transparency from the difference between the two
             // opaque reads.
             // Keep the black framebuffer alive in blackPassBackup until matte
             // has consumed it, then close both.
+            screenshotPending = true;
             blackPassBackup = blackPass;
             blackPass = null;
-            NativeImage whitePass;
-            try {
-                whitePass = ScreenshotRecorder.takeScreenshot(client.getFramebuffer());
-            } finally {
-                // We close the backup AFTER matte() uses it.
+            Screenshot.takeScreenshot(client.gameRenderer.mainRenderTarget(), whitePass -> {
+                try {
+                    System.out.printf("MATTE %s corners black=%08x white=%08x%n",
+                            view.name(), blackPassBackup.getPixel(0, 0), whitePass.getPixel(0, 0));
+                    NativeImage image = matte(blackPassBackup, whitePass);
+                    composites[view.ordinal()] = image;
+                    Path file = out.resolve("mcoo_" + view.name().toLowerCase() + ".png");
+                    ImageIO.write(nativeToBuffered(image), "PNG", file.toFile());
+                    System.out.println("WROTE " + file);
+                    viewComplete(client);
+                } catch (Exception error) {
+                    error.printStackTrace();
+                    client.stop();
+                    job = null;
+                    activeView = null;
+                } finally {
+                    blackPassBackup.close();
+                    whitePass.close();
+                    blackPassBackup = null;
+                    BackgroundPass.setWhite(false);
+                    screenshotPending = false;
+                }
+            });
+        }
+
+        void viewComplete(Minecraft client) throws Exception {
+            view++;
+            wait = 0;
+            if (view == View.values().length) {
+                assembleComposites();
+                System.out.println("LITEMATIC_RENDER_DONE " + out);
+                client.stop();
+                job = null;
+                activeView = null;
+                worldStartRequested = false;
+                worldSettleTicks = 0;
             }
-            NativeImage image = matte(blackPassBackup, whitePass);
-            composites[view.ordinal()] = image;
-            // Also write the individual view as a standalone PNG.
-            Path file = out.resolve("mcoo_" + view.name().toLowerCase() + ".png");
-            image.writeTo(file);
-            System.out.println("WROTE " + file);
-            // Close both framebuffer reads now that matte has consumed them.
-            blackPassBackup.close();
-            whitePass.close();
-            blackPassBackup = null;
-            // Reset for next view: capture a new black pass on next tick.
-            BackgroundPass.setWhite(false);
         }
 
         private NativeImage blackPassBackup;
@@ -252,8 +319,9 @@ public final class OffscreenRenderer {
             int width=black.getWidth(), height=black.getHeight();
             NativeImage result=new NativeImage(NativeImage.Format.RGBA,width,height,false);
             for (int y=0;y<height;y++) for (int x=0;x<width;x++) {
-                int br=black.getRed(x,y)&255, bg=black.getGreen(x,y)&255, bb=black.getBlue(x,y)&255;
-                int wr=white.getRed(x,y)&255, wg=white.getGreen(x,y)&255, wb=white.getBlue(x,y)&255;
+                int bc=black.getPixel(x,y), wc=white.getPixel(x,y);
+                int br=(bc>>>16)&255, bg=(bc>>>8)&255, bb=bc&255;
+                int wr=(wc>>>16)&255, wg=(wc>>>8)&255, wb=wc&255;
                 int transparency=Math.max(0,Math.min(255,Math.max(wr-br,Math.max(wg-bg,wb-bb))));
                 int alpha=255-transparency;
                 int red=alpha==0?0:Math.min(255,(br*255+alpha/2)/alpha);
@@ -264,30 +332,150 @@ public final class OffscreenRenderer {
                 // Earlier code had blue and red swapped, producing cyan-tinted
                 // pixels where the alpha matting passed values through wrong
                 // channels.
-                result.setColor(x,y,(alpha<<24)|(red<<16)|(green<<8)|blue);
+                result.setPixel(x,y,(alpha<<24)|(red<<16)|(green<<8)|blue);
             }
             return result;
         }
 
         /** Build the two composites and write them out. */
         void assembleComposites() throws Exception {
-            // Composite A: three-view ortho (TOP / FRONT / SIDE)
-            compositeStrip(new View[]{View.TOP, View.FRONT, View.SIDE},
-                    "mcoo_3view.png");
-            // Composite B: four-angle ortho strip (45/135/225/315)
-            compositeStrip(new View[]{View.ANGLE_45, View.ISO_135, View.ANGLE_225, View.ANGLE_315},
+            // Keep legacy filenames for downstream consumers; both now contain
+            // the complete V76 engineering sheet.
+            compositeEngineeringSheet("mcoo_3view.png");
+            compositeStrip(new View[]{View.AXON_X_POS_Z_NEG, View.AXON_X_POS_Z_POS,
+                            View.AXON_X_NEG_Z_POS, View.AXON_X_NEG_Z_NEG},
                     "mcoo_4angle.png");
+            compositeOverview();
+        }
+
+        private void compositeOverview() throws Exception {
+            // The overview is intentionally the same complete engineering sheet
+            // as the legacy 3view name. Reuse the already encoded result instead
+            // of running ten native pencil passes a second time.
+            Files.copy(out.resolve("mcoo_3view.png"), out.resolve("mcoo_overview.png"),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            System.out.println("WROTE COMPOSITE " + out.resolve("mcoo_overview.png") + " (reused engineering sheet)");
+        }
+
+        /**
+         * Owner-specified principal row: RIGHT, FRONT, LEFT, BACK; TOP is above
+         * FRONT and BOTTOM below it.  This deliberately follows the requested
+         * layout rather than claiming first- or third-angle conformance.  The
+         * four axonometric observation quadrants occupy the sheet corners.
+         */
+        private void compositeEngineeringSheet(String outName) throws Exception {
+            int captureWidth = composites[0].getWidth();
+            // A 2048 capture becomes a 1024-pixel drawing cell.  This keeps
+            // four times as many pixels per view as V76's fixed 540px cells.
+            int cell = Math.max(540, captureWidth / 2);
+            double scale = cell / 540.0;
+            int gap = (int)Math.round(42 * scale), margin = (int)Math.round(56 * scale);
+            int titleH = (int)Math.round(82 * scale), footerH = (int)Math.round(82 * scale);
+            int totalW = margin * 2 + cell * 4 + gap * 3;
+            int totalH = margin * 2 + titleH + cell * 3 + gap * 2 + footerH;
+            BufferedImage canvas = new BufferedImage(totalW, totalH, BufferedImage.TYPE_INT_ARGB);
+            java.awt.Graphics2D g = canvas.createGraphics();
+            g.setColor(java.awt.Color.WHITE);
+            g.fillRect(0, 0, totalW, totalH);
+            g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+                    java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            g.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING,
+                    java.awt.RenderingHints.VALUE_ANTIALIAS_ON);
+
+            int x0 = margin, x1 = x0 + cell + gap, x2 = x1 + cell + gap, x3 = x2 + cell + gap;
+            int y0 = margin + titleH, y1 = y0 + cell + gap, y2 = y1 + cell + gap;
+            drawViewCell(g, View.AXON_X_POS_Z_POS, x0, y0, cell, "AXON +X +Z", false);
+            drawViewCell(g, View.BOTTOM_X_UP, x1, y0, cell, "BOTTOM (+X UP)", false);
+            drawViewCell(g, View.AXON_X_NEG_Z_POS, x3, y0, cell, "AXON -X +Z", false);
+            drawViewCell(g, View.LEFT_Z_NEG, x0, y1, cell, "RIGHT (-Z LOOK)", false);
+            drawViewCell(g, View.FRONT_X_POS, x1, y1, cell, "FRONT (+X)", false);
+            drawViewCell(g, View.RIGHT_Z_POS, x2, y1, cell, "LEFT (V72)", false);
+            drawViewCell(g, View.BACK_X_NEG, x3, y1, cell, "BACK (-X)", false);
+            drawViewCell(g, View.AXON_X_POS_Z_NEG, x0, y2, cell, "AXON +X -Z", false);
+            drawViewCell(g, View.TOP_X_UP, x1, y2, cell, "TOP (+X UP)", false);
+            drawViewCell(g, View.AXON_X_NEG_Z_NEG, x3, y2, cell, "AXON -X -Z", false);
+
+            g.setColor(java.awt.Color.BLACK);
+            g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.BOLD, (int)Math.round(34 * scale)));
+            g.drawString("SIX PRINCIPAL VIEWS + FOUR AXONOMETRIC VIEWS", margin, margin + (int)Math.round(38 * scale));
+            g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.PLAIN, (int)Math.round(20 * scale)));
+            g.setColor(new java.awt.Color(101, 94, 84));
+            g.drawString("Owner-defined layout · common principal-view scale · observation stations labeled", margin, margin + (int)Math.round(69 * scale));
+
+            // A scale bar remains meaningful if the PNG is resized or printed.
+            double maxSpan = Math.max(maxX - minX, Math.max(maxY - minY, maxZ - minZ));
+            int blocks = niceScaleBar(maxSpan);
+            int sourcePixels = composites[View.TOP_X_UP.ordinal()].getWidth();
+            double sourcePixelsPerBlock = sourcePixels / (maxSpan * 1.2);
+            int barPixels = (int)Math.round(blocks * sourcePixelsPerBlock *
+                    (cell / (double)sourcePixels));
+            int barY = totalH - margin - (int)Math.round(35 * scale);
+            int barX = margin;
+            g.setColor(java.awt.Color.BLACK);
+            g.setStroke(new java.awt.BasicStroke((float)(3 * scale)));
+            g.drawLine(barX, barY, barX + barPixels, barY);
+            g.drawLine(barX, barY - (int)Math.round(8 * scale), barX, barY + (int)Math.round(8 * scale));
+            g.drawLine(barX + barPixels, barY - (int)Math.round(8 * scale), barX + barPixels, barY + (int)Math.round(8 * scale));
+            g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.PLAIN, (int)Math.round(19 * scale)));
+            g.drawString(blocks + " blocks", barX, barY - (int)Math.round(14 * scale));
+
+            g.setStroke(new java.awt.BasicStroke(2f));
+            g.setColor(new java.awt.Color(78, 72, 64));
+            g.drawRect(18, 18, totalW - 37, totalH - 37);
+            g.dispose();
+            Path file = out.resolve(outName);
+            ImageIO.write(canvas, "PNG", file.toFile());
+            System.out.println("WROTE COMPOSITE " + file + " (" + totalW + "x" + totalH + ")");
+        }
+
+        private void drawViewCell(java.awt.Graphics2D g, View view, int x, int y,
+                                  int size, String label, boolean rotateCounterClockwise) {
+            g.setColor(new java.awt.Color(107, 98, 86));
+            g.setStroke(new java.awt.BasicStroke(2.0f));
+            g.drawRect(x, y, size, size);
+            BufferedImage source = nativeToBuffered(composites[view.ordinal()]);
+            if (rotateCounterClockwise) {
+                java.awt.Graphics2D rotated = (java.awt.Graphics2D)g.create();
+                // Java2D's Y axis points down, so a negative angle is visually CCW.
+                rotated.rotate(-Math.PI / 2.0, x + size / 2.0, y + size / 2.0);
+                rotated.drawImage(source, x, y, size, size, null);
+                rotated.dispose();
+            } else {
+                g.drawImage(source, x, y, size, size, null);
+            }
+            g.setColor(java.awt.Color.BLACK);
+            int labelFontSize = Math.max(22, (int)Math.round(size * 22.0 / 540.0));
+            g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.BOLD, labelFontSize));
+            java.awt.FontMetrics fm = g.getFontMetrics();
+            int labelW = fm.stringWidth(label);
+            int labelX = x + (size - labelW) / 2;
+            int labelY = y + size - Math.max(18, size * 18 / 540);
+            g.setColor(new java.awt.Color(245, 240, 225, 226));
+            g.fillRoundRect(labelX - 12, labelY - fm.getAscent(), labelW + 24,
+                    fm.getHeight() + 4, 10, 10);
+            g.setColor(java.awt.Color.BLACK);
+            g.drawString(label, labelX, labelY);
+        }
+
+        private static int niceScaleBar(double maxSpan) {
+            if (maxSpan >= 100) return 50;
+            if (maxSpan >= 40) return 20;
+            if (maxSpan >= 20) return 10;
+            if (maxSpan >= 10) return 5;
+            return Math.max(1, (int)Math.floor(maxSpan / 2.0));
         }
 
         private void compositeStrip(View[] views, String outName) throws Exception {
             int vw = composites[views[0].ordinal()].getWidth();
             int vh = composites[views[0].ordinal()].getHeight();
-            int targetH = 1024;          // final strip height
+            int targetH = vh;            // preserve the full capture resolution
             int targetW = (int)Math.round(vw * (targetH / (double)vh));
             int totalW = targetW * views.length;
             java.awt.image.BufferedImage canvas = new java.awt.image.BufferedImage(
                     totalW, targetH, java.awt.image.BufferedImage.TYPE_INT_ARGB);
             java.awt.Graphics2D g = canvas.createGraphics();
+            g.setColor(java.awt.Color.WHITE);
+            g.fillRect(0, 0, totalW, targetH);
             g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
                     java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
             for (int i = 0; i < views.length; i++) {
@@ -309,13 +497,14 @@ public final class OffscreenRenderer {
             BufferedImage bi = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
             for (int y = 0; y < h; y++) {
                 for (int x = 0; x < w; x++) {
-                    int c = ni.getColor(x, y);
+                    int c = ni.getPixel(x, y);
                     bi.setRGB(x, y, c);
                 }
             }
             return bi;
         }
+
     }
 
-    private record FrozenEntity(Entity entity, Vec3d position) {}
+    private record FrozenEntity(Entity entity, Vec3 position) {}
 }
