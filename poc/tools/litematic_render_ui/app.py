@@ -9,6 +9,8 @@ import shlex
 import shutil
 import struct
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -143,20 +145,57 @@ def _read_nbt(path):
 
 
 def _read_litematic_metadata(path):
-    metadata = {"name": Path(path).stem, "dimensions": "—", "author": "—", "version": "—"}
+    path = Path(path)
+    metadata = {
+        "name": path.stem, "dimensions": "—", "author": "—", "version": "—",
+        "metadata_error": None,
+    }
     try:
+        file_size = path.stat().st_size
+        if file_size == 0:
+            raise ValueError("file is empty")
+        if file_size > 100 * 1024 * 1024:
+            raise ValueError(f"file too large: {file_size} bytes")
         root = _read_nbt(path)
         source = root.get("Metadata", {})
         size = source.get("EnclosingSize", {})
+        if not size or all(size.get(axis, 0) == 0 for axis in ("x", "y", "z")):
+            raise ValueError("EnclosingSize missing or zero")
         metadata.update({
             "name": str(source.get("Name") or metadata["name"]),
             "dimensions": f'{abs(int(size.get("x", 0)))} × {abs(int(size.get("y", 0)))} × {abs(int(size.get("z", 0)))}',
             "author": str(source.get("Author") or "—"),
             "version": str(root.get("Version", "—")),
         })
-    except (OSError, EOFError, ValueError, TypeError, struct.error):
-        pass
+    except (OSError, EOFError, ValueError, TypeError, struct.error) as error:
+        metadata["metadata_error"] = f"{type(error).__name__}: {error}"
+        print(f"[V120 NBT read] {path}: {metadata['metadata_error']}", file=sys.stderr)
     return metadata
+
+
+def _test_metadata():
+    """V120 smoke tests for the two reported schematics and a broken upload."""
+    samples = (
+        (Path("/tmp/【MCOO客运】Final 停靠站.litematic"), (11, 7, 48), "停靠站"),
+        (Path("/tmp/地毯机.litematic"), (16, 16, 16), "地毯机"),
+    )
+    for path, dimensions, label in samples:
+        metadata = _read_litematic_metadata(path)
+        assert metadata["metadata_error"] is None, f"{label}应解析成功: {metadata}"
+        expected = " × ".join(str(value) for value in dimensions)
+        assert metadata["dimensions"] == expected, f"{label} dimensions: {metadata['dimensions']}"
+
+    bad_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".litematic", delete=False) as bad_file:
+            bad_file.write(b"not a gzip file")
+            bad_path = Path(bad_file.name)
+        metadata = _read_litematic_metadata(bad_path)
+        assert metadata["metadata_error"] is not None, "坏文件应触发 metadata_error"
+    finally:
+        if bad_path is not None:
+            bad_path.unlink(missing_ok=True)
+    print("ALL OK")
 
 
 def _run(task_id):
