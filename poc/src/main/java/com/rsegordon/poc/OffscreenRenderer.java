@@ -5,6 +5,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 import com.mojang.blaze3d.platform.NativeImage;
@@ -118,16 +119,33 @@ public final class OffscreenRenderer {
         View(float yaw,float pitch) { this.yaw=yaw;this.pitch=pitch; }
     }
 
+    private enum Style {
+        BLUEPRINT, PAPER, BOTH;
+
+        static Style configured() {
+            String value = System.getProperty("litematic.style", "both").trim().toUpperCase(Locale.ROOT);
+            try {
+                return valueOf(value);
+            } catch (IllegalArgumentException error) {
+                throw new IllegalArgumentException("Invalid litematic.style='" +
+                        value.toLowerCase(Locale.ROOT) + "' (expected blueprint, paper, or both)", error);
+            }
+        }
+
+        boolean writesBlueprint() { return this != PAPER; }
+        boolean writesPaper() { return this != BLUEPRINT; }
+    }
+
     private record ViewState(Vec3 position, float halfSize, float farPlane) {}
 
     private static final class Job {
-        final Path input, out; boolean loaded, screenshotPending; int wait, view; NativeImage blackPass;
+        final Path input, out; final Style style; boolean loaded, screenshotPending; int wait, view; NativeImage blackPass;
         double minX, minY, minZ, maxX, maxY, maxZ;
         final List<FrozenEntity> frozenEntities=new ArrayList<>();
         int nextEntityId = -1000;
         // Per-view saved native image (post alpha matting) for composite assembly
         final NativeImage[] composites = new NativeImage[View.values().length];
-        Job(Path input, Path out) { this.input=input; this.out=out; }
+        Job(Path input, Path out) { this.input=input; this.out=out; this.style=Style.configured(); }
 
         void load(Minecraft client) throws Exception {
             CompoundTag root = NbtIo.readCompressed(input, NbtAccounter.unlimitedHeap());
@@ -196,7 +214,7 @@ public final class OffscreenRenderer {
             // Use Minecraft's supported brightness control while the actual
             // framebuffer is rendered. This exposes face and texture contrast
             // to the edge detector instead of trying to brighten an encoded PNG.
-            client.options.gamma().set(1.0);
+            client.options.gamma().set(positiveDoubleProperty("litematic.render.gamma", 1.0));
             client.options.renderDistance().set(RENDER_DISTANCE_CHUNKS);
             // Recreate section geometry with the safe 26.2 path. Unlike
             // resetLevelRenderData(), this waits for the occlusion graph reset
@@ -285,11 +303,17 @@ public final class OffscreenRenderer {
                             view.name(), blackPassBackup.getPixel(0, 0), whitePass.getPixel(0, 0));
                     NativeImage image = matte(blackPassBackup, whitePass);
                     composites[view.ordinal()] = image;
-                    Path file = out.resolve("mcoo_" + view.name().toLowerCase() + ".png");
-                    BufferedImage blueprint = blueprintEffect(nativeToBuffered(image));
-                    blueprintViews[view.ordinal()] = blueprint;
-                    ImageIO.write(blueprint, "PNG", file.toFile());
-                    System.out.println("WROTE " + file);
+                    BufferedImage color = nativeToBuffered(image);
+                    colorViews[view.ordinal()] = color;
+                    String baseName = "mcoo_" + view.name().toLowerCase(Locale.ROOT);
+                    if (style.writesBlueprint()) {
+                        BufferedImage blueprint = blueprintEffect(color);
+                        blueprintViews[view.ordinal()] = blueprint;
+                        writeSingleView(blueprint, out.resolve(baseName + ".png"), Style.BLUEPRINT);
+                    }
+                    if (style.writesPaper()) {
+                        writeSingleView(color, out.resolve(baseName + "_paper.png"), Style.PAPER);
+                    }
                     viewComplete(client);
                 } catch (Exception error) {
                     error.printStackTrace();
@@ -331,10 +355,15 @@ public final class OffscreenRenderer {
                     blueprintViews[i].flush();
                     blueprintViews[i] = null;
                 }
+                if (colorViews[i] != null) {
+                    colorViews[i].flush();
+                    colorViews[i] = null;
+                }
             }
         }
 
         private final BufferedImage[] blueprintViews = new BufferedImage[View.values().length];
+        private final BufferedImage[] colorViews = new BufferedImage[View.values().length];
 
         private NativeImage blackPassBackup;
 
@@ -362,22 +391,26 @@ public final class OffscreenRenderer {
 
         /** Build the two composites and write them out. */
         void assembleComposites() throws Exception {
-            // Keep legacy filenames for downstream consumers; both now contain
-            // the complete V76 engineering sheet.
-            compositeEngineeringSheet("mcoo_3view.png");
-            compositeStrip(new View[]{View.AXON_X_POS_Z_NEG, View.AXON_X_POS_Z_POS,
-                            View.AXON_X_NEG_Z_POS, View.AXON_X_NEG_Z_NEG},
-                    "mcoo_4angle.png");
-            compositeOverview();
+            if (style.writesBlueprint()) assembleStyle(Style.BLUEPRINT, "");
+            if (style.writesPaper()) assembleStyle(Style.PAPER, "_paper");
         }
 
-        private void compositeOverview() throws Exception {
+        private void assembleStyle(Style outputStyle, String suffix) throws Exception {
+            compositeEngineeringSheet("mcoo_3view" + suffix + ".png", outputStyle);
+            compositeStrip(new View[]{View.AXON_X_POS_Z_NEG, View.AXON_X_POS_Z_POS,
+                            View.AXON_X_NEG_Z_POS, View.AXON_X_NEG_Z_NEG},
+                    "mcoo_4angle" + suffix + ".png", outputStyle);
+            compositeOverview(suffix);
+        }
+
+        private void compositeOverview(String suffix) throws Exception {
             // The overview is intentionally the same complete engineering sheet
             // as the legacy 3view name. Reuse the already encoded result instead
             // of running ten native pencil passes a second time.
-            Files.copy(out.resolve("mcoo_3view.png"), out.resolve("mcoo_overview.png"),
+            Path destination = out.resolve("mcoo_overview" + suffix + ".png");
+            Files.copy(out.resolve("mcoo_3view" + suffix + ".png"), destination,
                     java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            System.out.println("WROTE COMPOSITE " + out.resolve("mcoo_overview.png") + " (reused engineering sheet)");
+            System.out.println("WROTE COMPOSITE " + destination + " (reused engineering sheet)");
         }
 
         /**
@@ -386,7 +419,7 @@ public final class OffscreenRenderer {
          * layout rather than claiming first- or third-angle conformance.  The
          * four axonometric observation quadrants occupy the sheet corners.
          */
-        private void compositeEngineeringSheet(String outName) throws Exception {
+        private void compositeEngineeringSheet(String outName, Style outputStyle) throws Exception {
             int captureWidth = composites[0].getWidth();
             // A 2048 capture becomes a 1024-pixel drawing cell.  This keeps
             // four times as many pixels per view as V76's fixed 540px cells.
@@ -398,10 +431,10 @@ public final class OffscreenRenderer {
             int totalH = margin * 2 + titleH + cell * 3 + gap * 2 + footerH;
             BufferedImage canvas = new BufferedImage(totalW, totalH, BufferedImage.TYPE_INT_ARGB);
             java.awt.Graphics2D g = canvas.createGraphics();
-            java.awt.Color sheetBackground = sheetBackground();
+            java.awt.Color sheetBackground = sheetBackground(outputStyle);
             g.setColor(sheetBackground);
             g.fillRect(0, 0, totalW, totalH);
-            drawEngineeringGrid(g, totalW, totalH);
+            drawEngineeringGrid(g, totalW, totalH, outputStyle);
             g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
                     java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
             g.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING,
@@ -409,16 +442,16 @@ public final class OffscreenRenderer {
 
             int x0 = margin, x1 = x0 + cell + gap, x2 = x1 + cell + gap, x3 = x2 + cell + gap;
             int y0 = margin + titleH, y1 = y0 + cell + gap, y2 = y1 + cell + gap;
-            drawViewCell(g, View.AXON_X_POS_Z_POS, x0, y0, cell, "AXON +X +Z", false, sheetBackground);
-            drawViewCell(g, View.BOTTOM_X_UP, x1, y0, cell, "BOTTOM (+X UP)", false, sheetBackground);
-            drawViewCell(g, View.AXON_X_NEG_Z_POS, x3, y0, cell, "AXON -X +Z", false, sheetBackground);
-            drawViewCell(g, View.LEFT_Z_NEG, x0, y1, cell, "RIGHT (-Z LOOK)", false, sheetBackground);
-            drawViewCell(g, View.FRONT_X_POS, x1, y1, cell, "FRONT (+X)", false, sheetBackground);
-            drawViewCell(g, View.RIGHT_Z_POS, x2, y1, cell, "LEFT (V72)", false, sheetBackground);
-            drawViewCell(g, View.BACK_X_NEG, x3, y1, cell, "BACK (-X)", false, sheetBackground);
-            drawViewCell(g, View.AXON_X_POS_Z_NEG, x0, y2, cell, "AXON +X -Z", false, sheetBackground);
-            drawViewCell(g, View.TOP_X_UP, x1, y2, cell, "TOP (+X UP)", false, sheetBackground);
-            drawViewCell(g, View.AXON_X_NEG_Z_NEG, x3, y2, cell, "AXON -X -Z", false, sheetBackground);
+            drawViewCell(g, View.AXON_X_POS_Z_POS, x0, y0, cell, "AXON +X +Z", false, sheetBackground, outputStyle);
+            drawViewCell(g, View.BOTTOM_X_UP, x1, y0, cell, "BOTTOM (+X UP)", false, sheetBackground, outputStyle);
+            drawViewCell(g, View.AXON_X_NEG_Z_POS, x3, y0, cell, "AXON -X +Z", false, sheetBackground, outputStyle);
+            drawViewCell(g, View.LEFT_Z_NEG, x0, y1, cell, "RIGHT (-Z LOOK)", false, sheetBackground, outputStyle);
+            drawViewCell(g, View.FRONT_X_POS, x1, y1, cell, "FRONT (+X)", false, sheetBackground, outputStyle);
+            drawViewCell(g, View.RIGHT_Z_POS, x2, y1, cell, "LEFT (V72)", false, sheetBackground, outputStyle);
+            drawViewCell(g, View.BACK_X_NEG, x3, y1, cell, "BACK (-X)", false, sheetBackground, outputStyle);
+            drawViewCell(g, View.AXON_X_POS_Z_NEG, x0, y2, cell, "AXON +X -Z", false, sheetBackground, outputStyle);
+            drawViewCell(g, View.TOP_X_UP, x1, y2, cell, "TOP (+X UP)", false, sheetBackground, outputStyle);
+            drawViewCell(g, View.AXON_X_NEG_Z_NEG, x3, y2, cell, "AXON -X -Z", false, sheetBackground, outputStyle);
 
             g.setColor(java.awt.Color.BLACK);
             g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.BOLD, (int)Math.round(34 * scale)));
@@ -453,15 +486,19 @@ public final class OffscreenRenderer {
             System.out.println("WROTE COMPOSITE " + file + " (" + totalW + "x" + totalH + ")");
         }
 
-        private static void drawEngineeringGrid(java.awt.Graphics2D g, int width, int height) {
-            int size = positiveIntProperty("litematic.sheet.grid.size", 64);
-            g.setColor(rgbProperty("litematic.sheet.grid.color", new java.awt.Color(60, 60, 60)));
+        private static void drawEngineeringGrid(java.awt.Graphics2D g, int width, int height, Style style) {
+            int size = nonNegativeIntProperty("litematic.sheet.grid.size", 64);
+            if (size == 0) return;
+            java.awt.Color fallback = style == Style.PAPER
+                    ? new java.awt.Color(210, 205, 195) : new java.awt.Color(125, 145, 165);
+            g.setColor(rgbProperty("litematic.sheet.grid.color", fallback));
             g.setStroke(new java.awt.BasicStroke(1f));
             for (int x = size; x < width; x += size) g.drawLine(x, 0, x, height);
             for (int y = size; y < height; y += size) g.drawLine(0, y, width, y);
         }
 
-        private static java.awt.Color sheetBackground() {
+        private static java.awt.Color sheetBackground(Style style) {
+            if (style == Style.PAPER) return new java.awt.Color(245, 240, 225);
             int b = colorProperty("litematic.sheet.bg.b", 95);
             int g = colorProperty("litematic.sheet.bg.g", 50);
             int r = colorProperty("litematic.sheet.bg.r", 18);
@@ -470,14 +507,14 @@ public final class OffscreenRenderer {
 
         private void drawViewCell(java.awt.Graphics2D g, View view, int x, int y,
                                   int size, String label, boolean rotateCounterClockwise,
-                                  java.awt.Color background) {
+                                  java.awt.Color background, Style style) {
             // Cover the sheet grid before drawing the transparent edge layer.
             g.setColor(background);
             g.fillRect(x, y, size, size);
             g.setColor(new java.awt.Color(107, 98, 86));
             g.setStroke(new java.awt.BasicStroke(2.0f));
             g.drawRect(x, y, size, size);
-            BufferedImage source = blueprintViews[view.ordinal()];
+            BufferedImage source = viewsFor(style)[view.ordinal()];
             if (rotateCounterClockwise) {
                 java.awt.Graphics2D rotated = (java.awt.Graphics2D)g.create();
                 // Java2D's Y axis points down, so a negative angle is visually CCW.
@@ -509,7 +546,7 @@ public final class OffscreenRenderer {
             return Math.max(1, (int)Math.floor(maxSpan / 2.0));
         }
 
-        private void compositeStrip(View[] views, String outName) throws Exception {
+        private void compositeStrip(View[] views, String outName, Style outputStyle) throws Exception {
             int vw = composites[views[0].ordinal()].getWidth();
             int vh = composites[views[0].ordinal()].getHeight();
             int targetH = vh;            // preserve the full capture resolution
@@ -518,18 +555,36 @@ public final class OffscreenRenderer {
             java.awt.image.BufferedImage canvas = new java.awt.image.BufferedImage(
                     totalW, targetH, java.awt.image.BufferedImage.TYPE_INT_ARGB);
             java.awt.Graphics2D g = canvas.createGraphics();
-            g.setColor(sheetBackground());
+            g.setColor(sheetBackground(outputStyle));
             g.fillRect(0, 0, totalW, targetH);
+            drawEngineeringGrid(g, totalW, targetH, outputStyle);
             g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
                     java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
             for (int i = 0; i < views.length; i++) {
-                BufferedImage src = blueprintViews[views[i].ordinal()];
+                BufferedImage src = viewsFor(outputStyle)[views[i].ordinal()];
                 g.drawImage(src, i * targetW, 0, targetW, targetH, null);
             }
             g.dispose();
             Path file = out.resolve(outName);
             ImageIO.write(canvas, "PNG", file.toFile());
             System.out.println("WROTE COMPOSITE " + file + " (" + totalW + "x" + targetH + ")");
+        }
+
+        private BufferedImage[] viewsFor(Style outputStyle) {
+            return outputStyle == Style.PAPER ? colorViews : blueprintViews;
+        }
+
+        private static void writeSingleView(BufferedImage source, Path file, Style outputStyle) throws Exception {
+            BufferedImage canvas = new BufferedImage(source.getWidth(), source.getHeight(), BufferedImage.TYPE_INT_ARGB);
+            java.awt.Graphics2D g = canvas.createGraphics();
+            g.setColor(sheetBackground(outputStyle));
+            g.fillRect(0, 0, canvas.getWidth(), canvas.getHeight());
+            drawEngineeringGrid(g, canvas.getWidth(), canvas.getHeight(), outputStyle);
+            g.drawImage(source, 0, 0, null);
+            g.dispose();
+            ImageIO.write(canvas, "PNG", file.toFile());
+            canvas.flush();
+            System.out.println("WROTE " + file);
         }
 
         private static BufferedImage nativeToBuffered(NativeImage ni) {
