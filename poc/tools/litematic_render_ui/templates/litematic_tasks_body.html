@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+    <title>{{(metadata.name if metadata and metadata.name else '投影渲染')}} · 工具 · Hermes</title>
+    <link rel="icon" href="/favicon.png">
+    <link rel="stylesheet" href="/css/morandi">
+    <style>
+        .container{max-width:980px;margin:20px auto;background:#fff;border-radius:12px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+        .header{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);margin-bottom:14px;gap:12px;flex-wrap:wrap}
+        .header h1{font-size:15px;font-weight:700;margin:0}
+        .header-left{display:flex;align-items:center;gap:10px;flex:1;min-width:0}
+        .header-right{display:flex;align-items:center;gap:8px;flex-shrink:0}
+        .back-arrow{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);text-decoration:none;flex-shrink:0;transition:background .15s,border-color .15s,color .15s}
+        .back-arrow:hover{background:var(--user-bubble);border-color:var(--accent);color:var(--accent)}
+
+        .input-form{background:linear-gradient(135deg,var(--card) 0%,var(--bg) 100%);border:2px dashed var(--border);border-radius:14px;padding:32px 24px;margin-bottom:14px;text-align:center;transition:all .2s}
+        .input-form:hover{border-color:var(--blue);background:linear-gradient(135deg,var(--bg) 0%,rgba(139,165,181,.06) 100%)}
+        .input-form.dragging{border-color:var(--blue);border-style:solid;background:rgba(139,165,181,.08);transform:scale(1.01)}
+        .input-form .upload-icon{font-size:42px;margin-bottom:10px;display:block;opacity:.55;line-height:1}
+        .input-form .upload-title{font-size:16px;color:var(--text);margin:0 0 6px;font-weight:600}
+        .input-form .upload-subtitle{font-size:12px;color:var(--muted);margin:0 0 18px}
+        .input-form .file-input{display:none}
+        .input-form .file-pick{display:inline-flex;align-items:center;gap:8px;padding:10px 22px;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;background:var(--card);color:var(--text);border:1px solid var(--border);transition:all .15s}
+        .input-form .file-pick:hover{border-color:var(--blue);color:var(--blue);background:var(--bg)}
+        .input-form .file-pick svg{flex-shrink:0}
+        .input-form .file-name{display:block;margin:14px auto 0;font-size:12px;color:var(--muted);min-height:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:80%}
+        .input-form .file-name.has-file{color:var(--blue);font-weight:600}
+        .input-form .upload-submit{margin-top:16px;border:0;border-radius:10px;padding:11px 28px;font-size:14px;font-weight:600;cursor:pointer;background:var(--blue);color:#fff;white-space:nowrap;transition:all .15s;display:none}
+        .input-form .upload-submit:hover{background:#7B95A5;transform:translateY(-1px);box-shadow:0 4px 12px rgba(139,165,181,.25)}
+        .input-form .upload-submit.show{display:inline-flex;align-items:center;gap:6px}
+        .input-form .upload-submit svg{flex-shrink:0}
+
+        .history-section{background:var(--bg);border-radius:10px;padding:14px 16px}
+        .history-section h2{font-size:13px;color:var(--muted);margin:0 0 10px;font-weight:600}
+        .card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+        .task{position:relative;background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:.2s}
+        .task:hover{border-color:var(--blue);box-shadow:0 3px 10px rgba(139,165,181,.15)}
+        .cover-link{display:block;color:inherit;text-decoration:none}
+        .cover-wrap{position:relative;aspect-ratio:4/3;background:linear-gradient(135deg,var(--border),var(--bg));overflow:hidden}
+        .cover{width:100%;height:100%;object-fit:cover}
+        .placeholder{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted);font-size:12px;text-align:center;padding:8px}
+        .has-cover .placeholder{display:none}
+        .delete{position:absolute;right:7px;top:7px;z-index:3;width:27px;height:27px;border:0;border-radius:50%;background:rgba(0,0,0,.58);color:#fff;font-size:18px;cursor:pointer;opacity:0;line-height:1}
+        .task:hover .delete,.delete:focus{opacity:1}
+        .body{padding:10px 12px}
+        .title{font-size:13px;font-weight:600;overflow-wrap:anywhere}
+        .info{font-size:11px;color:var(--muted);margin-top:6px}
+        .progress-text{font-size:10px;color:var(--muted);margin-top:6px}
+        .footer{padding:8px 12px 10px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px;font-size:10px;position:relative}
+        .task.rendering .footer::before,.task.queued .footer::before{content:"";position:absolute;left:0;top:-1px;width:var(--p,0%);height:3px;background:linear-gradient(90deg,var(--blue),#00a1d6);transition:width .4s}
+        .state{padding:2px 8px;border-radius:8px;font-weight:600}
+        .complete{background:#E8F0E6;color:#5A7A55}
+        .queued,.rendering{background:#FAF3DC;color:#8A7A55}
+        .failed{background:#F4E4E2;color:#8A5550}
+        .spacer{flex:1}
+        .open{color:var(--blue);text-decoration:none;font-weight:600;font-size:11px}
+        .retry{padding:5px 9px;background:#8A6655;color:#fff;border:0;border-radius:6px;font-size:11px;cursor:pointer}
+        .empty{text-align:center;padding:48px 32px;color:var(--muted);font-size:13px;grid-column:1/-1;background:var(--card);border-radius:10px;border:1px dashed var(--border)}
+        .empty .empty-icon{font-size:38px;display:block;margin-bottom:10px;opacity:.45;line-height:1}
+        .empty .empty-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px}
+        .empty .empty-sub{font-size:11px;color:var(--muted)}
+
+        @media(max-width:720px){.container{margin:8px;border-radius:10px;padding:14px}.input-form{padding:24px 16px}.upload-submit{width:100%}}
+    </style>
+</head>
+<body>
+    {{ nav|safe }}
+    <div class="container">
+        <div class="header">
+            <div class="header-left">
+                <h1>🧱 投影渲染与备货</h1>
+            </div>
+            <div class="header-right">
+                <a href="/tools" class="back-arrow" title="返回工具" aria-label="返回工具">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+                </a>
+            </div>
+        </div>
+
+        <form class="input-form" action="/tools/litematic_render/upload" method="post" enctype="multipart/form-data" id="upload-form">
+            <span class="upload-icon">📦</span>
+            <p class="upload-title">上传 Litematica 投影</p>
+            <p class="upload-subtitle">支持 .litematic 文件 · 拖拽到此处或点击下方按钮</p>
+            <input class="file-input" name="litematic" type="file" accept=".litematic" id="litematic-input" required>
+            <label class="file-pick" for="litematic-input">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                选择文件
+            </label>
+            <span class="file-name" id="file-name">未选择任何文件</span>
+            <button class="upload-submit" type="submit" id="upload-submit">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                开始渲染
+            </button>
+        </form>
+
+        <div class="history-section">
+            <h2>📚 最近任务</h2>
+            <div id="card-grid" class="card-grid">
+                {% for task in tasks %}
+                <article class="task {{task.status}}" data-id="{{task.id}}" style="--p:{{task.progress}}%">
+                    <button class="delete" type="button" aria-label="删除任务">×</button>
+                    <a class="cover-link" href="/tools/litematic_render/{{task.id}}/">
+                        <div class="cover-wrap{% if task.outputs.thumbnail %} has-cover{% endif %}">
+                            {% if task.outputs.thumbnail %}
+                            <img class="cover" src="/tools/litematic_render/{{task.id}}/download/thumbnail" alt="{{task.filename}} 彩图正交视图" loading="lazy">
+                            {% endif %}
+                            <div class="placeholder">
+                                {% if task.status in ['queued','rendering'] %}彩图正交视图生成中{% else %}暂无彩图正交视图{% endif %}
+                            </div>
+                        </div>
+                        <div class="body">
+                            <div class="title">{{task.filename}}</div>
+                            <div class="info">{{"%.2f"|format(task.size/1048576)}} MB · 彩图正交</div>
+                            {% if task.status in ['queued','rendering'] %}<div class="progress-text">进度 {{task.progress}}%</div>{% endif %}
+                        </div>
+                    </a>
+                    <div class="footer">
+                        <span class="state {{task.status}}">{{{'queued':'排队中','rendering':'渲染中','complete':'已完成','failed':'失败'}.get(task.status,task.status)}}</span>
+                        <time data-ts="{{task.created_at}}"></time>
+                        <span class="spacer"></span>
+                        {% if task.status == 'failed' %}<button class="retry" type="button">重试</button>{% endif %}
+                        {% if task.status == 'complete' %}<a class="open" href="/tools/litematic_render/{{task.id}}/">下载 ›</a>{% endif %}
+                    </div>
+                </article>
+                {% else %}
+                <div class="empty">
+                    <span class="empty-icon">📭</span>
+                    <div class="empty-title">还没有任务</div>
+                    <div class="empty-sub">先上传一个 Litematica 投影吧</div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+
+    <script>
+    document.querySelectorAll('time[data-ts]').forEach(function(el){
+      el.textContent=new Date(Number(el.dataset.ts)*1000).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})
+    });
+    document.addEventListener('click',async function(e){
+      var card=e.target.closest('.task');
+      if(!card)return;
+      if(e.target.closest('.retry')){
+        e.preventDefault();
+        var r=await fetch('/api/tools/litematic_render/'+card.dataset.id+'/retry',{method:'POST'});
+        if(r.ok)location.reload();else alert((await r.json()).error||'重试失败');
+      }
+      if(e.target.closest('.delete')){
+        e.preventDefault();
+        if(!confirm('确定删除这个任务？'))return;
+        var r=await fetch('/api/tools/litematic_render/'+card.dataset.id,{method:'DELETE'});
+        if(r.ok)card.remove();else alert((await r.json()).error||'删除失败');
+      }
+    });
+    if(document.querySelector('.state.rendering,.state.queued'))setTimeout(function(){location.reload()},3000);
+
+    // 8-27: 美化 file input + 拖拽上传
+    (function(){
+      var form=document.getElementById('upload-form');
+      var input=document.getElementById('litematic-input');
+      var fileName=document.getElementById('file-name');
+      var submitBtn=document.getElementById('upload-submit');
+      if(!form||!input)return;
+      function update(file){
+        if(file){
+          fileName.textContent=file.name;
+          fileName.classList.add('has-file');
+          submitBtn.classList.add('show');
+        }else{
+          fileName.textContent='未选择任何文件';
+          fileName.classList.remove('has-file');
+          submitBtn.classList.remove('show');
+        }
+      }
+      input.addEventListener('change',function(){update(input.files[0])});
+      ['dragenter','dragover'].forEach(function(evt){
+        form.addEventListener(evt,function(e){e.preventDefault();e.stopPropagation();form.classList.add('dragging')});
+      });
+      ['dragleave','drop'].forEach(function(evt){
+        form.addEventListener(evt,function(e){e.preventDefault();e.stopPropagation();form.classList.remove('dragging')});
+      });
+      form.addEventListener('drop',function(e){
+        var files=e.dataTransfer.files;
+        if(files&&files.length){
+          input.files=files;
+          update(files[0]);
+        }
+      });
+    })();
+    </script>
+</body>
+</html>

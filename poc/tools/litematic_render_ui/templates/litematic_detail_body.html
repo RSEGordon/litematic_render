@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+    <title>{{metadata.name}} · 投影详情 · Hermes</title>
+    <link rel="icon" href="/favicon.png">
+    <link rel="stylesheet" href="/css/morandi">
+    <style>
+        .container{max-width:980px;margin:20px auto;background:#fff;border-radius:12px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+        .header{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);margin-bottom:14px;gap:12px;flex-wrap:wrap}
+        .header h1{font-size:15px;font-weight:700;margin:0}
+        .header-left{display:flex;align-items:center;gap:10px;flex:1;min-width:0}
+        .header-right{display:flex;align-items:center;gap:8px;flex-shrink:0}
+        .back-arrow{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);text-decoration:none;flex-shrink:0;transition:background .15s,border-color .15s,color .15s}
+        .back-arrow:hover{background:var(--user-bubble);border-color:var(--accent);color:var(--accent)}
+
+        .card-grid{display:grid;gap:12px}
+        .card{background:var(--bg);border-radius:10px;padding:14px 16px}
+        .summary{display:flex;align-items:center;gap:16px}
+        .summary-main{min-width:0;flex:1}
+        .project-name{font-size:22px;line-height:1.2;margin:0 0 12px;overflow-wrap:anywhere;font-weight:700}
+        .meta-row{display:flex;align-items:stretch;gap:8px;flex-wrap:nowrap}
+        .meta{display:flex;flex:1;min-width:0;gap:8px;flex-wrap:nowrap}
+        .meta div{flex:1;min-width:90px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:9px 11px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .meta small{display:block;color:var(--muted);font-size:10px;margin-bottom:4px}
+        .source-download{display:flex;align-items:center;flex:none;white-space:nowrap;text-decoration:none;background:var(--blue);color:#fff;border-radius:8px;padding:10px 14px;font-size:12px;font-weight:600;transition:background .15s}
+        .source-download:hover{background:#7B95A5}
+        .download-actions{display:flex;align-items:stretch;gap:8px;flex:none}
+        .viewer-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:8px;flex-wrap:wrap}
+        .viewer-title{font-size:13px;font-weight:600;color:var(--muted)}
+        .toggle-switch{display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:12px;color:var(--text)}
+        .toggle-switch input{position:absolute;opacity:0;pointer-events:none}
+        .toggle-track{position:relative;width:36px;height:20px;background:var(--border);border-radius:10px;transition:background .2s;flex-shrink:0}
+        .toggle-thumb{position:absolute;top:2px;left:2px;width:16px;height:16px;background:var(--card);border-radius:50%;transition:transform .2s;box-shadow:0 1px 3px rgba(0,0,0,.15)}
+        .toggle-switch input:checked+.toggle-track{background:var(--blue)}
+        .toggle-switch input:checked+.toggle-track .toggle-thumb{transform:translateX(16px)}
+        .viewer{position:relative;min-height:320px;display:grid;place-items:center;background:#e8e5e0;border-radius:8px;overflow:hidden}
+        .viewer img{display:block;max-width:100%;max-height:72vh;object-fit:contain}
+        .icon-btn{position:absolute;display:grid;place-items:center;width:42px;height:42px;border:0;border-radius:50%;background:rgba(0,0,0,.58);color:#fff;text-decoration:none;cursor:pointer;opacity:0;transition:opacity .18s;font-size:20px;line-height:1}
+        .viewer:hover .icon-btn,.icon-btn:focus{opacity:1}
+        .prev{left:12px;top:50%;transform:translateY(-50%)}
+        .next{right:12px;top:50%;transform:translateY(-50%)}
+        .drawing-download{right:12px;bottom:12px}
+        .viewer-hint{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);font-size:11px;color:#fff;background:rgba(0,0,0,.5);padding:3px 10px;border-radius:10px;opacity:0;transition:opacity .2s;pointer-events:none}
+        .viewer:hover .viewer-hint{opacity:.85}
+        .image-modal{display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.92);align-items:center;justify-content:center;cursor:zoom-out;overflow:hidden;touch-action:none}
+        .image-modal.open{display:flex}
+        .image-modal-close{position:absolute;top:20px;right:20px;z-index:2;width:42px;height:42px;border-radius:50%;background:rgba(255,255,255,.15);color:#fff;border:0;font-size:24px;cursor:pointer;line-height:1;display:grid;place-items:center;transition:background .15s}
+        .image-modal-close:hover{background:rgba(255,255,255,.3)}
+        .image-modal img{max-width:95vw;max-height:95vh;object-fit:contain;cursor:grab;box-shadow:0 8px 32px rgba(0,0,0,.5);user-select:none;-webkit-user-drag:none;will-change:transform}
+        .image-modal img.dragging{cursor:grabbing}
+        .empty{color:var(--muted);font-size:12px}
+        .workbook{display:flex;align-items:center;gap:14px;color:inherit;text-decoration:none}
+        .excel-icon{display:grid;place-items:center;width:48px;height:48px;border-radius:10px;background:#E8F0E6;color:#5A7A55;font-size:22px}
+        .workbook-main{flex:1;min-width:0}
+        .workbook-name{display:block;font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis}
+        .workbook-meta{display:block;font-size:11px;color:var(--muted);margin-top:5px}
+        .download-mark{color:var(--blue);font-size:20px}
+        .error{padding:10px 12px;background:#F4E4E2;color:#8A5550;border-radius:8px;font-size:12px;margin-bottom:12px}
+
+        @media(max-width:700px){.container{margin:8px;border-radius:10px;padding:14px}.meta-row,.meta{flex-wrap:wrap}.meta div{min-width:calc(50% - 4px)}.download-actions{width:100%}.source-download{flex:1;justify-content:center;padding:10px 8px}.icon-btn{opacity:1}.project-name{font-size:18px}}
+    </style>
+</head>
+<body>
+    {{ nav|safe }}
+    <div class="container">
+        <div class="header">
+            <div class="header-left">
+                <a href="/tools/litematic_render/" class="back-arrow" title="返回投影渲染" aria-label="返回投影渲染">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+                </a>
+                <h1>🧱 投影渲染</h1>
+            </div>
+            <div class="header-right">
+                <a href="/tools" class="back-arrow" title="返回工具" aria-label="返回工具">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+                </a>
+            </div>
+        </div>
+
+        {% if task.error %}<div class="error">{{task.error}}</div>{% endif %}
+        {% if metadata.metadata_error %}<div class="error">元数据读取失败：{{metadata.metadata_error}}</div>{% endif %}
+
+        <div class="card-grid">
+            <section class="card summary">
+                <div class="summary-main">
+                    <h1 class="project-name">{{metadata.name}}</h1>
+                    <div class="meta-row">
+                        <div class="meta">
+                            <div><small>尺寸</small>{{metadata.dimensions}}</div>
+                            <div><small>版本</small>{{metadata.version}}</div>
+                            <div><small>作者</small>{{metadata.author}}</div>
+                            <div><small>大小</small>{{"%.2f"|format(task.size/1048576)}} MB</div>
+                        </div>
+                        <div class="download-actions">
+                            <a class="source-download" href="/tools/litematic_render/{{task.id}}/source">下载 .litematic</a>
+                            <a class="source-download" href="/tools/litematic_render/{{task.id}}/download/zip">下载压缩包</a>
+                        </div>
+                    </div>
+                </div>
+            </section>
+            <section class="card">
+                <div class="viewer-header">
+                    <span class="viewer-title">工程制图</span>
+                    <label class="toggle-switch" title="切换材料列表显示">
+                        <input type="checkbox" id="materials-toggle" checked>
+                        <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        <span class="toggle-label">材料列表</span>
+                    </label>
+                </div>
+                <div class="viewer">
+                    {% if task.outputs.paper %}
+                    <img id="drawing" src="/tools/litematic_render/{{task.id}}/download/paper" alt="工程制图">
+                    <button class="icon-btn prev" type="button" aria-label="上一张">‹</button>
+                    <button class="icon-btn next" type="button" aria-label="下一张">›</button>
+                    <a id="drawing-download" class="icon-btn drawing-download" href="/tools/litematic_render/{{task.id}}/download/paper" download aria-label="下载图片">↓</a>
+                    <span class="viewer-hint">点击图片放大</span>
+                    {% else %}
+                    <span class="empty">渲染中，完成后自动刷新</span>
+                    {% endif %}
+                </div>
+            </section>
+            <section class="card">
+                {% if task.outputs.workbook %}
+                <a class="workbook" href="/tools/litematic_render/{{task.id}}/download/workbook">
+                    <span class="excel-icon">▦</span>
+                    <span class="workbook-main">
+                        <span class="workbook-name">{{task.outputs.workbook}}</span>
+                        <span class="workbook-meta">{{materials|length}} 种材料 · XLSX</span>
+                    </span>
+                    <span class="download-mark">↓</span>
+                </a>
+                {% else %}
+                <span class="empty">材料清单生成中</span>
+                {% endif %}
+            </section>
+        </div>
+    </div>
+
+    <div id="image-modal" class="image-modal" aria-hidden="true" role="dialog" aria-label="工程制图放大预览">
+        <button class="image-modal-close" type="button" aria-label="关闭">×</button>
+        <img id="image-modal-img" src="" alt="放大图" draggable="false">
+    </div>
+
+    <script>
+    var task={{task|tojson}};
+    var toggle=document.getElementById('materials-toggle');
+    var img=document.getElementById('drawing');
+    var dl=document.getElementById('drawing-download');
+    var available=[];
+    var current=0;
+    function refreshAvailable(){
+      available=[];
+      var outputs=task.outputs||{};
+      var keys=toggle&&toggle.checked?['paper','blueprint']:['paper_no_materials','blueprint_no_materials'];
+      keys.forEach(function(kind){if(outputs[kind])available.push(kind)});
+    }
+    function showCurrent(){
+      current=0;
+      if(!img||!available.length)return;
+      var url='/tools/litematic_render/'+task.id+'/download/'+available[current];
+      img.src=url;
+      if(dl)dl.href=url;
+    }
+    function move(delta){
+      if(!img||!available.length)return;
+      current=(current+delta+available.length)%available.length;
+      var url='/tools/litematic_render/'+task.id+'/download/'+available[current];
+      img.src=url;
+      if(dl)dl.href=url;
+    }
+    refreshAvailable();
+    showCurrent();
+    if(toggle)toggle.addEventListener('change',function(){refreshAvailable();showCurrent()});
+    document.querySelector('.prev')?.addEventListener('click',function(){move(-1)});
+    document.querySelector('.next')?.addEventListener('click',function(){move(1)});
+
+    var modal=document.getElementById('image-modal');
+    var modalImg=document.getElementById('image-modal-img');
+    var closeButton=document.querySelector('.image-modal-close');
+    var scale=1, offsetX=0, offsetY=0, pointers=new Map(), pinchDistance=0;
+    function renderTransform(){modalImg.style.transform='translate('+offsetX+'px,'+offsetY+'px) scale('+scale+')'}
+    function resetTransform(){scale=1;offsetX=0;offsetY=0;pinchDistance=0;pointers.clear();renderTransform()}
+    function openModal(){
+      if(!img||!modal||!modalImg)return;
+      resetTransform();modalImg.src=img.src;modal.classList.add('open');modal.setAttribute('aria-hidden','false');document.body.style.overflow='hidden';closeButton.focus();
+    }
+    function closeModal(){modal.classList.remove('open');modal.setAttribute('aria-hidden','true');document.body.style.overflow='';resetTransform()}
+    if(img)img.addEventListener('click',openModal);
+    if(img)img.style.cursor='zoom-in';
+    modal.addEventListener('click',function(event){if(event.target===modal)closeModal()});
+    closeButton.addEventListener('click',closeModal);
+    document.addEventListener('keydown',function(event){if(event.key==='Escape'&&modal.classList.contains('open'))closeModal()});
+    modal.addEventListener('wheel',function(event){
+      event.preventDefault();scale=Math.min(8,Math.max(1,scale*(event.deltaY<0?1.15:.87)));if(scale===1){offsetX=0;offsetY=0}renderTransform();
+    },{passive:false});
+    modalImg.addEventListener('pointerdown',function(event){event.preventDefault();modalImg.setPointerCapture(event.pointerId);pointers.set(event.pointerId,{x:event.clientX,y:event.clientY});modalImg.classList.add('dragging')});
+    modalImg.addEventListener('pointermove',function(event){
+      if(!pointers.has(event.pointerId))return;
+      var previous=pointers.get(event.pointerId);pointers.set(event.pointerId,{x:event.clientX,y:event.clientY});
+      var points=Array.from(pointers.values());
+      if(points.length===1&&scale>1){offsetX+=event.clientX-previous.x;offsetY+=event.clientY-previous.y}
+      if(points.length===2){var distance=Math.hypot(points[0].x-points[1].x,points[0].y-points[1].y);if(pinchDistance)scale=Math.min(8,Math.max(1,scale*distance/pinchDistance));pinchDistance=distance}
+      renderTransform();
+    });
+    function releasePointer(event){pointers.delete(event.pointerId);pinchDistance=0;if(!pointers.size)modalImg.classList.remove('dragging')}
+    modalImg.addEventListener('pointerup',releasePointer);modalImg.addEventListener('pointercancel',releasePointer);
+    if({{(task.status in ['queued','rendering'])|tojson}})setTimeout(function(){location.reload()},3000);
+    </script>
+</body>
+</html>

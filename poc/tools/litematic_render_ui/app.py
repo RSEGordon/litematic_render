@@ -29,6 +29,124 @@ _render_lock = threading.Lock()
 bp = Blueprint("litematic_render", __name__, template_folder="templates")
 
 
+def _page_nav(page, extra_right=""):
+    """Wrap the shared combined_app5.page_nav() so the Blueprint gets the same global nav template bili_summary uses.
+
+    Falls back to a local mirror if the import fails (keeps the Blueprint self-contained for tests).
+    After page_nav returns, we re-highlight the nav item whose path is a prefix of `page` — page_nav
+    only does exact matching, so /tools/litematic_render/ never gets the "🛠️ 工具" highlight.
+    """
+    try:
+        from combined_app5 import page_nav as _combined_page_nav  # type: ignore
+        nav = _combined_page_nav(page, extra_right=extra_right)
+    except Exception:
+        nav = _render_local(page)
+    # Re-highlight: any link whose href is a prefix of the current page wins.
+    import re as _re
+    def _patch(match):
+        href = match.group(1)
+        if href.startswith(("http://", "https://")):
+            return match.group(0)
+        is_active = (page == href or (href != "/" and page.startswith(href.rstrip("/") + "/"))) or \
+                    (href != "/" and page.rstrip("/") == href.rstrip("/"))
+        if is_active:
+            return f'<a href="{href}" class="active">'
+        return match.group(0)
+    return _re.sub(r'<a href="([^"]+)"(?:\s+class="active")?>', _patch, nav)
+
+
+def _render_local(page):
+    items = [("/", "📊 监控"), ("/files", "📁 共享"), ("/voice", "🎙️ 语音"), ("/tools", "🛠️ 工具"), ("https://clawblog.rseg.club/", "📝 博客")]
+    nav = '''<button class="mobile-nav-toggle" type="button" aria-label="打开导航" aria-controls="siteNav" aria-expanded="false"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="transform: rotate(180deg);"><polyline points="9 18 15 12 9 6"/></svg></button>
+<nav class="nav" id="siteNav" aria-label="主导航">'''
+    for u, t in items:
+        active = ' class="active"' if (page == u or (u != "/" and page.startswith(u))) else ''
+        nav += f'<a href="{u}"{active}>{t}</a>'
+    nav += '''</nav>
+<button class="nav-backdrop" type="button" aria-label="关闭导航" tabindex="-1"></button>'''
+    return nav
+
+
+def _nav_style_block():
+    """Mirror of the @media/CSS chunk page_nav injects. Kept in sync with combined_app5."""
+    return '''<style>
+.nav{display:flex;gap:8px;align-items:center;margin-left:auto;padding:8px 4px}
+.nav a{color:var(--blue);font-size:12px;text-decoration:none;padding:7px 9px;border-radius:7px}
+.nav a:hover{background:var(--user-bubble);color:var(--accent)}
+.nav a.active{background:var(--blue);color:#fff;font-weight:700}
+.mobile-nav-toggle,.nav-backdrop{display:none}
+@media (min-width:640px) and (max-width:1024px){
+  .container{max-width:760px!important;margin:14px auto!important;padding:14px!important}
+}
+@media (max-width:639px){
+  body.nav-open{overflow:hidden}
+  .mobile-nav-toggle{display:flex;position:fixed;top:50%;left:0;width:18px;height:56px;align-items:center;justify-content:center;border:none;border-radius:0 8px 8px 0;background:#8BA5B5;color:#fff;cursor:pointer;box-shadow:2px 2px 8px rgba(0,0,0,.15);transform:translateY(-50%);transition:left .24s ease,background .2s ease;z-index:1002}
+  .mobile-nav-toggle:hover{background:#7A95A6}
+  .mobile-nav-toggle svg{transition:transform .24s ease;display:block}
+  body.nav-open .mobile-nav-toggle{left:min(280px,82vw)}
+  body.nav-open .mobile-nav-toggle svg{transform:rotate(0deg)}
+  .nav{position:fixed!important;inset:0 auto 0 0!important;z-index:1001!important;width:min(280px,82vw)!important;height:100vh!important;height:100dvh!important;padding:calc(16px + env(safe-area-inset-top)) 16px calc(20px + env(safe-area-inset-bottom))!important;display:flex!important;flex-direction:column!important;justify-content:flex-start!important;align-items:stretch!important;gap:8px!important;transform:translateX(-105%);transition:transform .24s ease;box-shadow:8px 0 24px rgba(75,67,56,.14);overflow-y:auto;-webkit-overflow-scrolling:touch}
+  .nav a{min-height:44px!important;width:100%;padding:10px 16px!important;border-radius:10px!important;font-size:14px!important}
+  .nav-open .nav{transform:translateX(0)}
+  .nav-backdrop{display:block;position:fixed;inset:0;z-index:1000;border:0;background:rgba(50,50,50,.32);opacity:0;visibility:hidden;transition:opacity .24s ease,visibility .24s ease}
+  .nav-open .nav-backdrop{opacity:1;visibility:visible}
+  .container{width:calc(100% - 16px)!important;margin:8px!important;padding:12px!important;border-radius:10px!important}
+  h1{font-size:1.25rem!important}
+  .upload-row{align-items:stretch!important}
+  .upload-btn,.upload-submit,.btn,.modal-copy,.modal-close{min-height:44px;display:inline-flex;align-items:center;justify-content:center}
+  .upload-btn,.upload-submit{padding:10px 14px!important}
+  .sort-bar{max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;white-space:nowrap}
+  .sort-link{min-width:44px;min-height:44px;display:inline-flex;align-items:center;justify-content:center}
+  li{min-height:52px!important;padding:6px 4px!important}
+  .dira a{width:100%;min-height:44px;display:flex;align-items:center}
+  .file-info{min-width:1;width:100%;min-height:44px;display:flex;align-items:center}
+  .file-name{max-width:none!important;font-size:13px!important}
+  .file-actions{gap:8px!important}
+  .btn{min-width:44px;padding:8px!important}
+  .modal{padding:12px}
+  .modal-content{width:100%!important;padding:18px!important;max-height:calc(100dvh - 24px);overflow-y:auto;-webkit-overflow-scrolling:touch}
+  .modal-url-box{flex-direction:column}
+  .modal-url{width:100%;min-height:44px}
+  .footer{font-size:12px;padding-bottom:calc(12px + env(safe-area-inset-bottom))}
+}
+@media (prefers-reduced-motion:reduce){.nav,.nav-backdrop{transition-duration:.01ms}}
+</style>'''
+
+
+def _nav_script_block():
+    """Mirror of the JS chunk page_nav injects. Kept in sync with combined_app5."""
+    return '''<script>
+(function(){
+  var toggle=document.querySelector('.mobile-nav-toggle');
+  var backdrop=document.querySelector('.nav-backdrop');
+  var nav=document.getElementById('siteNav');
+  if(!toggle||!backdrop||!nav)return;
+  function setNav(open){
+    document.body.classList.toggle('nav-open',open);
+    toggle.setAttribute('aria-expanded',String(open));
+    toggle.setAttribute('aria-label',open?'关闭导航':'打开导航');
+    toggle.classList.toggle('open',open);
+  }
+  toggle.addEventListener('click',function(){setNav(!document.body.classList.contains('nav-open'))});
+  backdrop.addEventListener('click',function(){setNav(false)});
+  nav.querySelectorAll('a').forEach(function(link){link.addEventListener('click',function(){setNav(false)})});
+  document.addEventListener('keydown',function(event){if(event.key==='Escape')setNav(false)});
+  var media=window.matchMedia('(min-width:640px)');
+  if(media.addEventListener)media.addEventListener('change',function(event){if(event.matches)setNav(false)});
+})();
+</script>'''
+
+
+def _render_with_nav(page, body_html):
+    """Wrap a body fragment with the same global nav template bili_summary uses.
+
+    combined_app5.page_nav returns the nav HTML already bundled with the matching CSS + JS, so we
+    just inject it as-is into the body — no separate _nav_style_block/_nav_script_block needed.
+    """
+    nav = _page_nav(page)
+    return nav + body_html
+
+
 def register(app):
     """Register the three-level UI and upload API on combined_app5's port."""
     RAW_DIR.mkdir(parents=True, exist_ok=True)
@@ -157,19 +275,22 @@ def _read_litematic_metadata(path):
         if file_size > 100 * 1024 * 1024:
             raise ValueError(f"file too large: {file_size} bytes")
         root = _read_nbt(path)
-        source = root.get("Metadata", {})
-        size = source.get("EnclosingSize", {})
+        metadata_field = root.get("Metadata", {})
+        size = root.get("Size", {})
+        version_int = root.get("MinecraftDataVersion")
+        if version_int is None:
+            raise ValueError("MinecraftDataVersion missing")
         if not size or all(size.get(axis, 0) == 0 for axis in ("x", "y", "z")):
-            raise ValueError("EnclosingSize missing or zero")
+            raise ValueError("Size missing or zero")
         metadata.update({
-            "name": str(source.get("Name") or metadata["name"]),
+            "name": str(metadata_field.get("Name") or metadata["name"]),
             "dimensions": f'{abs(int(size.get("x", 0)))} × {abs(int(size.get("y", 0)))} × {abs(int(size.get("z", 0)))}',
-            "author": str(source.get("Author") or "—"),
-            "version": str(root.get("Version", "—")),
+            "author": str(metadata_field.get("Author") or "—"),
+            "version": str(int(version_int)),
         })
     except (OSError, EOFError, ValueError, TypeError, struct.error) as error:
         metadata["metadata_error"] = f"{type(error).__name__}: {error}"
-        print(f"[V120 NBT read] {path}: {metadata['metadata_error']}", file=sys.stderr)
+        print(f"[V121 NBT read] {path}: {metadata['metadata_error']}", file=sys.stderr)
     return metadata
 
 
@@ -232,7 +353,9 @@ def _run(task_id):
         output_prefix = re.sub(r'[\\/:*?"<>|]', "_", output_prefix).strip() or "litematic"
         outputs = {
             "paper": f"{output_prefix}_overview_paper.png" if (output / f"{output_prefix}_overview_paper.png").is_file() else None,
+            "paper_no_materials": f"{output_prefix}_overview_paper_no_materials.png" if (output / f"{output_prefix}_overview_paper_no_materials.png").is_file() else None,
             "blueprint": f"{output_prefix}_overview.png" if (output / f"{output_prefix}_overview.png").is_file() else None,
+            "blueprint_no_materials": f"{output_prefix}_overview_no_materials.png" if (output / f"{output_prefix}_overview_no_materials.png").is_file() else None,
             "thumbnail": "mcoo_axon_x_pos_z_pos_paper.png" if (output / "mcoo_axon_x_pos_z_pos_paper.png").is_file() else None,
             "workbook": workbook.name if workbook else None,
             "log": log_file.name,
@@ -255,7 +378,8 @@ def task_list():
         thumbnail = Path(task.get("output_dir", "")) / "mcoo_axon_x_pos_z_pos_paper.png"
         if thumbnail.is_file():
             task.setdefault("outputs", {})["thumbnail"] = thumbnail.name
-    return render_template("litematic_tasks.html", tasks=tasks)
+    body = render_template("litematic_tasks_body.html", tasks=tasks, nav=_page_nav("/tools/litematic_render/"))
+    return body
 
 
 @bp.post("/tools/litematic_render/upload")
@@ -304,8 +428,9 @@ def task_detail(task_id):
         abort(404)
     materials = _workbook_materials(task)
     metadata = _read_litematic_metadata(task["source_path"])
-    return render_template("litematic_detail.html", task=_with_progress(task), materials=materials,
-                           metadata=metadata)
+    body = render_template("litematic_detail_body.html", task=_with_progress(task), materials=materials,
+                           metadata=metadata, nav=_page_nav("/tools/litematic_render/"))
+    return body
 
 
 @bp.get("/api/tools/litematic_render/<task_id>")
@@ -358,10 +483,24 @@ def download_source(task_id):
     return send_file(task["source_path"], as_attachment=True, download_name=task["filename"])
 
 
+@bp.get("/tools/litematic_render/<task_id>/download/zip")
+def download_zip(task_id):
+    task = _task(task_id)
+    if not task:
+        abort(404, description="任务不存在")
+    path = Path(task["output_dir"]) / "outputs.zip"
+    if not path.is_file():
+        abort(404, description="该任务暂无可下载的压缩包")
+    return send_file(path, as_attachment=True, download_name="outputs.zip")
+
+
 @bp.get("/tools/litematic_render/<task_id>/download/<kind>")
 def download_output(task_id, kind):
     task = _task(task_id)
-    if not task or kind not in {"paper", "blueprint", "thumbnail", "workbook", "log"}:
+    if not task or kind not in {
+        "paper", "paper_no_materials", "blueprint", "blueprint_no_materials",
+        "thumbnail", "workbook", "log",
+    }:
         abort(404)
     filename = task.get("outputs", {}).get(kind)
     if kind == "thumbnail" and not filename:
@@ -371,7 +510,7 @@ def download_output(task_id, kind):
     path = (Path(task["output_dir"]) / filename).resolve()
     if path.parent != Path(task["output_dir"]).resolve() or not path.is_file():
         abort(404)
-    inline = kind in {"paper", "blueprint", "thumbnail"}
+    inline = kind in {"paper", "paper_no_materials", "blueprint", "blueprint_no_materials", "thumbnail"}
     return send_file(path, as_attachment=not inline, download_name=path.name)
 
 
