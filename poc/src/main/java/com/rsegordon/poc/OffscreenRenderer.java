@@ -4,6 +4,8 @@ import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -15,6 +17,8 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Screenshot;
 import net.minecraft.client.gui.screens.TitleScreen;
+import net.minecraft.client.gui.GuiGraphicsExtractor;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
@@ -35,6 +39,9 @@ import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.clock.ClockNetworkState;
 import net.minecraft.world.clock.WorldClock;
 import net.minecraft.world.clock.WorldClocks;
@@ -106,6 +113,10 @@ public final class OffscreenRenderer {
             if (!job.loaded) { job.load(client); return; }
             job.enforceCaptureTime(client);
             job.freezeEntities();
+            if (job.materialCapture) {
+                job.captureMaterialsTick(client);
+                return;
+            }
             View view = View.values()[Math.min(job.view, View.values().length - 1)];
             activeView = job.cameraFor(view, client);
             client.player.setPos(activeView.position.x,
@@ -187,6 +198,8 @@ public final class OffscreenRenderer {
         final Path input, out; final Style style; final long renderTime;
         final double blueprintNightVision, blueprintGamma;
         boolean loaded, screenshotPending, nightVisionApplied, passRebuildPending;
+        boolean materialCapture;
+        int materialCapturePhase, materialWait;
         int wait, view;
         NativeImage blackPass;
         CapturePass capturePass;
@@ -195,6 +208,8 @@ public final class OffscreenRenderer {
         long previousDayTime;
         double minX, minY, minZ, maxX, maxY, maxZ;
         final List<FrozenEntity> frozenEntities=new ArrayList<>();
+        final List<MaterialEntry> materials=new ArrayList<>();
+        NativeImage materialBlackPass;
         int nextEntityId = -1000;
         // Per-view saved native image (post alpha matting) for composite assembly
         final NativeImage[] composites = new NativeImage[View.values().length];
@@ -231,11 +246,24 @@ public final class OffscreenRenderer {
                     client.level.setBlock(new BlockPos(x,y,z),air,19,512);
                 }
             }
+            long[] paletteCounts = new long[palette.size()];
             for (int y=0;y<sy;y++) for (int z=0;z<sz;z++) for (int x=0;x<sx;x++) {
                 int n=(y*sz+z)*sx+x, start=n*bits, word=start>>>6, shift=start&63;
                 long value=packed[word]>>>shift; if (shift+bits>64) value|=packed[word+1]<<(64-shift);
-                client.level.setBlock(origin.offset(x,y,z), palette.get((int)(value&mask)), 19,512);
+                int paletteIndex=(int)(value&mask);
+                paletteCounts[paletteIndex]++;
+                client.level.setBlock(origin.offset(x,y,z), palette.get(paletteIndex), 19,512);
             }
+            HashMap<Item, Long> itemCounts = new HashMap<>();
+            for (int i=0;i<palette.size();i++) {
+                Item item=palette.get(i).getBlock().asItem();
+                ItemStack stack=item.getDefaultInstance();
+                if (!stack.isEmpty() && paletteCounts[i] > 0) itemCounts.merge(item,paletteCounts[i],Long::sum);
+            }
+            itemCounts.forEach((item,count) -> materials.add(new MaterialEntry(
+                    item.getDefaultInstance(),item.getDefaultInstance().getHoverName().getString(),count)));
+            materials.sort(Comparator.comparingLong(MaterialEntry::count).reversed()
+                    .thenComparing(MaterialEntry::name,String.CASE_INSENSITIVE_ORDER));
             ListTag tiles=region.getListOrEmpty("TileEntities");
             for (int i=0;i<tiles.size();i++) {
                 CompoundTag tag=tiles.getCompoundOrEmpty(i).copy(); BlockPos p=origin.offset(tag.getIntOr("x",0),tag.getIntOr("y",0),tag.getIntOr("z",0));
@@ -418,8 +446,11 @@ public final class OffscreenRenderer {
                         gammaCorrected.flush();
                         color.flush();
                     } else {
-                        colorViews[view.ordinal()] = color;
-                        writeSingleView(color, out.resolve(baseName + "_paper.png"));
+                        BufferedImage contrasted=applyContrast(color,
+                                positiveDoubleProperty("litematic.paper.contrast",1.08));
+                        colorViews[view.ordinal()] = contrasted;
+                        writeSingleView(contrasted, out.resolve(baseName + "_paper.png"));
+                        color.flush();
                     }
                     if (!retainImage) image.close();
                     viewComplete(client);
@@ -455,7 +486,68 @@ public final class OffscreenRenderer {
                     passRebuildPending = true;
                     return;
                 }
-                assembleComposites();
+                beginMaterialCapture(client);
+                return;
+            }
+        }
+
+        void beginMaterialCapture(Minecraft client) {
+            materialCapture=true;
+            materialCapturePhase=0;
+            materialWait=0;
+            client.setScreenAndShow(new MaterialIconScreen(materials,false));
+        }
+
+        void captureMaterialsTick(Minecraft client) {
+            if (screenshotPending || ++materialWait < 5) return;
+            screenshotPending=true;
+            Screenshot.takeScreenshot(client.gameRenderer.mainRenderTarget(), image -> {
+                try {
+                    if (materialCapturePhase == 0) {
+                        materialBlackPass=image;
+                        materialCapturePhase=1;
+                        materialWait=0;
+                        client.setScreenAndShow(new MaterialIconScreen(materials,true));
+                        image=null;
+                    } else {
+                        NativeImage iconSheet=matte(materialBlackPass,image);
+                        extractMaterialIcons(iconSheet,client.getWindow().getGuiScaledWidth(),
+                                client.getWindow().getGuiScaledHeight());
+                        iconSheet.close();
+                        materialBlackPass.close();
+                        materialBlackPass=null;
+                        client.setScreenAndShow(null);
+                        assembleComposites();
+                        finish(client);
+                    }
+                } catch (Exception error) {
+                    error.printStackTrace();
+                    client.stop();
+                    job=null;
+                } finally {
+                    if (image != null) image.close();
+                    screenshotPending=false;
+                }
+            });
+        }
+
+        void extractMaterialIcons(NativeImage sheet, int guiWidth, int guiHeight) {
+            double scaleX=sheet.getWidth()/(double)guiWidth;
+            double scaleY=sheet.getHeight()/(double)guiHeight;
+            int columns=MaterialIconScreen.columns(guiWidth);
+            for (int i=0;i<materials.size();i++) {
+                int logicalX=MaterialIconScreen.iconX(i,columns);
+                int logicalY=MaterialIconScreen.iconY(i,columns);
+                int x=(int)Math.round(logicalX*scaleX), y=(int)Math.round(logicalY*scaleY);
+                int w=Math.max(1,(int)Math.round(16*scaleX)), h=Math.max(1,(int)Math.round(16*scaleY));
+                BufferedImage icon=new BufferedImage(w,h,BufferedImage.TYPE_INT_ARGB);
+                for (int py=0;py<h;py++) for (int px=0;px<w;px++)
+                    icon.setRGB(px,py,sheet.getPixel(Math.min(sheet.getWidth()-1,x+px),Math.min(sheet.getHeight()-1,y+py)));
+                materials.get(i).icon=icon;
+            }
+        }
+
+        void finish(Minecraft client) {
                 closeCapturedViews();
                 clearNightVision(client);
                 setPaperFullbright(false);
@@ -467,7 +559,6 @@ public final class OffscreenRenderer {
                 activeView = null;
                 worldStartRequested = false;
                 worldSettleTicks = 0;
-            }
         }
 
         void clearNightVision(Minecraft client) {
@@ -491,6 +582,12 @@ public final class OffscreenRenderer {
                 if (colorViews[i] != null) {
                     colorViews[i].flush();
                     colorViews[i] = null;
+                }
+            }
+            for (MaterialEntry material : materials) {
+                if (material.icon != null) {
+                    material.icon.flush();
+                    material.icon=null;
                 }
             }
         }
@@ -560,8 +657,10 @@ public final class OffscreenRenderer {
             double scale = cell / 540.0;
             int gap = (int)Math.round(42 * scale), margin = (int)Math.round(56 * scale);
             int titleH = (int)Math.round(82 * scale), footerH = (int)Math.round(82 * scale);
+            int materialRows=Math.max(1,(materials.size()+3)/4);
+            int materialsH=(int)Math.round((52+materialRows*42)*scale);
             int totalW = margin * 2 + cell * 4 + gap * 3;
-            int totalH = margin * 2 + titleH + cell * 3 + gap * 2 + footerH;
+            int totalH = margin * 2 + titleH + cell * 3 + gap * 2 + materialsH + footerH;
             BufferedImage canvas = new BufferedImage(totalW, totalH, BufferedImage.TYPE_INT_ARGB);
             java.awt.Graphics2D g = canvas.createGraphics();
             java.awt.Color sheetBackground = sheetBackground(outputStyle);
@@ -575,23 +674,28 @@ public final class OffscreenRenderer {
 
             int x0 = margin, x1 = x0 + cell + gap, x2 = x1 + cell + gap, x3 = x2 + cell + gap;
             int y0 = margin + titleH, y1 = y0 + cell + gap, y2 = y1 + cell + gap;
-            drawViewCell(g, View.AXON_X_POS_Z_POS, x0, y0, cell, "AXON +X +Z", false, outputStyle);
-            drawViewCell(g, View.BOTTOM_X_UP, x1, y0, cell, "BOTTOM (+X UP)", false, outputStyle);
-            drawViewCell(g, View.AXON_X_NEG_Z_POS, x3, y0, cell, "AXON -X +Z", false, outputStyle);
-            drawViewCell(g, View.LEFT_Z_NEG, x0, y1, cell, "RIGHT (-Z LOOK)", false, outputStyle);
-            drawViewCell(g, View.FRONT_X_POS, x1, y1, cell, "FRONT (+X)", false, outputStyle);
-            drawViewCell(g, View.RIGHT_Z_POS, x2, y1, cell, "LEFT (V72)", false, outputStyle);
-            drawViewCell(g, View.BACK_X_NEG, x3, y1, cell, "BACK (-X)", false, outputStyle);
-            drawViewCell(g, View.AXON_X_POS_Z_NEG, x0, y2, cell, "AXON +X -Z", false, outputStyle);
-            drawViewCell(g, View.TOP_X_UP, x1, y2, cell, "TOP (+X UP)", false, outputStyle);
-            drawViewCell(g, View.AXON_X_NEG_Z_NEG, x3, y2, cell, "AXON -X -Z", false, outputStyle);
+            drawViewCell(g, View.AXON_X_POS_Z_POS, x0, y0, cell, false, outputStyle);
+            drawViewCell(g, View.BOTTOM_X_UP, x1, y0, cell, false, outputStyle);
+            drawViewCell(g, View.AXON_X_NEG_Z_POS, x3, y0, cell, false, outputStyle);
+            drawViewCell(g, View.LEFT_Z_NEG, x0, y1, cell, false, outputStyle);
+            drawViewCell(g, View.FRONT_X_POS, x1, y1, cell, false, outputStyle);
+            drawViewCell(g, View.RIGHT_Z_POS, x2, y1, cell, false, outputStyle);
+            drawViewCell(g, View.BACK_X_NEG, x3, y1, cell, false, outputStyle);
+            drawViewCell(g, View.AXON_X_POS_Z_NEG, x0, y2, cell, false, outputStyle);
+            drawViewCell(g, View.TOP_X_UP, x1, y2, cell, false, outputStyle);
+            drawViewCell(g, View.AXON_X_NEG_Z_NEG, x3, y2, cell, false, outputStyle);
 
-            g.setColor(java.awt.Color.BLACK);
+            java.awt.Color primary=outputStyle == Style.BLUEPRINT ? java.awt.Color.WHITE : java.awt.Color.BLACK;
+            java.awt.Color secondary=outputStyle == Style.BLUEPRINT ? new java.awt.Color(232,238,244) : new java.awt.Color(101,94,84);
+            g.setColor(primary);
             g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.BOLD, (int)Math.round(34 * scale)));
-            g.drawString("SIX PRINCIPAL VIEWS + FOUR AXONOMETRIC VIEWS", margin, margin + (int)Math.round(38 * scale));
+            g.drawString(sheetTitle(), margin, margin + (int)Math.round(38 * scale));
             g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.PLAIN, (int)Math.round(20 * scale)));
-            g.setColor(new java.awt.Color(101, 94, 84));
-            g.drawString("Owner-defined layout · common principal-view scale · observation stations labeled", margin, margin + (int)Math.round(69 * scale));
+            g.setColor(secondary);
+            g.drawString("Orthographic and axonometric views · common principal-view scale", margin, margin + (int)Math.round(69 * scale));
+
+            int materialsY=y2+cell+(int)Math.round(28*scale);
+            drawMaterials(g,margin,materialsY,totalW-margin*2,scale,primary);
 
             // A scale bar remains meaningful if the PNG is resized or printed.
             double maxSpan = Math.max(maxX - minX, Math.max(maxY - minY, maxZ - minZ));
@@ -602,7 +706,7 @@ public final class OffscreenRenderer {
                     (cell / (double)sourcePixels));
             int barY = totalH - margin - (int)Math.round(35 * scale);
             int barX = margin;
-            g.setColor(java.awt.Color.BLACK);
+            g.setColor(primary);
             g.setStroke(new java.awt.BasicStroke((float)(3 * scale)));
             g.drawLine(barX, barY, barX + barPixels, barY);
             g.drawLine(barX, barY - (int)Math.round(8 * scale), barX, barY + (int)Math.round(8 * scale));
@@ -611,7 +715,7 @@ public final class OffscreenRenderer {
             g.drawString(blocks + " blocks", barX, barY - (int)Math.round(14 * scale));
 
             g.setStroke(new java.awt.BasicStroke(2f));
-            g.setColor(new java.awt.Color(78, 72, 64));
+            g.setColor(outputStyle == Style.BLUEPRINT ? java.awt.Color.WHITE : new java.awt.Color(78,72,64));
             g.drawRect(18, 18, totalW - 37, totalH - 37);
             g.dispose();
             Path file = out.resolve(outName);
@@ -639,7 +743,7 @@ public final class OffscreenRenderer {
         }
 
         private void drawViewCell(java.awt.Graphics2D g, View view, int x, int y,
-                                  int size, String label, boolean rotateCounterClockwise,
+                                  int size, boolean rotateCounterClockwise,
                                   Style style) {
             BufferedImage source = viewsFor(style)[view.ordinal()];
             if (rotateCounterClockwise) {
@@ -651,18 +755,47 @@ public final class OffscreenRenderer {
             } else {
                 g.drawImage(source, x, y, size, size, null);
             }
-            g.setColor(java.awt.Color.BLACK);
-            int labelFontSize = Math.max(22, (int)Math.round(size * 22.0 / 540.0));
-            g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.BOLD, labelFontSize));
-            java.awt.FontMetrics fm = g.getFontMetrics();
-            int labelW = fm.stringWidth(label);
-            int labelX = x + (size - labelW) / 2;
-            int labelY = y + size - Math.max(18, size * 18 / 540);
-            g.setColor(new java.awt.Color(245, 240, 225, 226));
-            g.fillRoundRect(labelX - 12, labelY - fm.getAscent(), labelW + 24,
-                    fm.getHeight() + 4, 10, 10);
-            g.setColor(java.awt.Color.BLACK);
-            g.drawString(label, labelX, labelY);
+        }
+
+        private String sheetTitle() {
+            String name=input.getFileName().toString();
+            return name.toLowerCase(Locale.ROOT).endsWith(".litematic")
+                    ? name.substring(0,name.length()-".litematic".length()) : name;
+        }
+
+        private void drawMaterials(java.awt.Graphics2D g, int x, int y, int width,
+                                   double scale, java.awt.Color textColor) {
+            int heading=(int)Math.round(22*scale), rowH=(int)Math.round(42*scale);
+            int iconSize=(int)Math.round(28*scale), columnW=width/4;
+            g.setColor(textColor);
+            g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF,java.awt.Font.BOLD,heading));
+            g.drawString("MATERIALS",x,y+heading);
+            int rows=Math.max(1,(materials.size()+3)/4);
+            g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF,java.awt.Font.PLAIN,(int)Math.round(17*scale)));
+            for (int i=0;i<materials.size();i++) {
+                int column=i/rows, row=i%rows;
+                int cellX=x+column*columnW, cellY=y+(int)Math.round(34*scale)+row*rowH;
+                MaterialEntry entry=materials.get(i);
+                if (entry.icon != null) g.drawImage(entry.icon,cellX,cellY,iconSize,iconSize,null);
+                int textX=cellX+iconSize+(int)Math.round(10*scale);
+                int baseline=cellY+(int)Math.round(21*scale);
+                String quantity=Long.toString(entry.count);
+                java.awt.FontMetrics fm=g.getFontMetrics();
+                int quantityX=cellX+columnW-(int)Math.round(12*scale)-fm.stringWidth(quantity);
+                int available=Math.max(10,quantityX-textX-(int)Math.round(10*scale));
+                String name=fitText(entry.name,fm,available);
+                g.setColor(textColor);
+                g.drawString(name,textX,baseline);
+                g.drawString(quantity,quantityX,baseline);
+            }
+        }
+
+        private static String fitText(String value, java.awt.FontMetrics fm, int width) {
+            if (fm.stringWidth(value)<=width) return value;
+            String suffix="…";
+            int end=value.length();
+            while (end>0 && fm.stringWidth(value.substring(0,end)+suffix)>width) end--;
+            return value.substring(0,end)+suffix;
         }
 
         private static int niceScaleBar(double maxSpan) {
@@ -735,6 +868,23 @@ public final class OffscreenRenderer {
             return corrected;
         }
 
+        private static BufferedImage applyContrast(BufferedImage source, double contrast) {
+            int width=source.getWidth(),height=source.getHeight();
+            BufferedImage result=new BufferedImage(width,height,BufferedImage.TYPE_INT_ARGB);
+            for (int y=0;y<height;y++) for (int x=0;x<width;x++) {
+                int pixel=source.getRGB(x,y),alpha=pixel>>>24;
+                int red=contrastChannel((pixel>>>16)&255,contrast);
+                int green=contrastChannel((pixel>>>8)&255,contrast);
+                int blue=contrastChannel(pixel&255,contrast);
+                result.setRGB(x,y,(alpha<<24)|(red<<16)|(green<<8)|blue);
+            }
+            return result;
+        }
+
+        private static int contrastChannel(int value,double contrast) {
+            return Math.max(0,Math.min(255,(int)Math.round(128+(value-128)*contrast)));
+        }
+
         /**
          * Pure-Java approximation of the owner-provided OpenCV blueprint_effect:
          * grayscale, a small edge-preserving-filter substitute, Canny-like Sobel
@@ -779,9 +929,9 @@ public final class OffscreenRenderer {
             byte[] edgeClass = new byte[width * height];
             int[] sobelX = {-1, 0, 1, -2, 0, 2, -1, 0, 1};
             int[] sobelY = {-1, -2, -1, 0, 0, 0, 1, 2, 1};
-            int cannyLow = positiveIntProperty("litematic.blueprint.canny.low", 3);
+            int cannyLow = positiveIntProperty("litematic.blueprint.canny.low", 5);
             int cannyHigh = Math.max(cannyLow,
-                    positiveIntProperty("litematic.blueprint.canny.high", 12));
+                    positiveIntProperty("litematic.blueprint.canny.high", 16));
             for (int y = 1; y < height - 1; y++) {
                 for (int x = 1; x < width - 1; x++) {
                     int gx = 0;
@@ -820,6 +970,10 @@ public final class OffscreenRenderer {
                 }
             }
 
+            edges=cleanupNoise(edges,
+                    positiveIntProperty("litematic.blueprint.noise.minPixels",6),
+                    nonNegativeIntProperty("litematic.blueprint.noise.radius",1));
+
             int dilateKernel = positiveIntProperty("litematic.blueprint.dilate.kernel", 1);
             int dilateIterations = nonNegativeIntProperty("litematic.blueprint.dilate.iterations", 0);
             BufferedImage result = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
@@ -835,6 +989,48 @@ public final class OffscreenRenderer {
             }
             graphics.dispose();
             return result;
+        }
+
+        private static BufferedImage cleanupNoise(BufferedImage edges,int minPixels,int radius) {
+            int width=edges.getWidth(),height=edges.getHeight(),length=width*height;
+            byte[] visited=new byte[length];
+            int[] queue=new int[length];
+            BufferedImage connected=new BufferedImage(width,height,BufferedImage.TYPE_BYTE_BINARY);
+            for (int start=0;start<length;start++) {
+                int sx=start%width,sy=start/width;
+                if (visited[start]!=0 || edges.getRaster().getSample(sx,sy,0)==0) continue;
+                int head=0,tail=0;
+                queue[tail++]=start; visited[start]=1;
+                while (head<tail) {
+                    int point=queue[head++],px=point%width,py=point/width;
+                    for (int dy=-1;dy<=1;dy++) for (int dx=-1;dx<=1;dx++) {
+                        if (dx==0 && dy==0) continue;
+                        int nx=px+dx,ny=py+dy;
+                        if (nx<0 || nx>=width || ny<0 || ny>=height) continue;
+                        int next=ny*width+nx;
+                        if (visited[next]==0 && edges.getRaster().getSample(nx,ny,0)!=0) {
+                            visited[next]=1; queue[tail++]=next;
+                        }
+                    }
+                }
+                if (tail>=minPixels) for (int i=0;i<tail;i++)
+                    connected.getRaster().setSample(queue[i]%width,queue[i]/width,0,1);
+            }
+            if (radius==0) return connected;
+            BufferedImage cleaned=new BufferedImage(width,height,BufferedImage.TYPE_BYTE_BINARY);
+            for (int y=0;y<height;y++) for (int x=0;x<width;x++) {
+                if (connected.getRaster().getSample(x,y,0)==0) continue;
+                boolean neighbor=false;
+                for (int dy=-radius;dy<=radius && !neighbor;dy++) for (int dx=-radius;dx<=radius;dx++) {
+                    if (dx==0 && dy==0) continue;
+                    int nx=x+dx,ny=y+dy;
+                    if (nx>=0 && nx<width && ny>=0 && ny<height &&
+                            connected.getRaster().getSample(nx,ny,0)!=0) { neighbor=true; break; }
+                }
+                if (neighbor) cleaned.getRaster().setSample(x,y,0,1);
+            }
+            connected.flush();
+            return cleaned;
         }
 
         private static float[] gaussianKernel(int size, double sigma) {
@@ -964,6 +1160,45 @@ public final class OffscreenRenderer {
                     + " and opaque view content: " + file + " transparent=" + transparent
                     + " opaque=" + opaque);
         }
+    }
+
+    /** A deliberately minimal screen used only to ask Minecraft's own GUI item
+     * renderer for the exact Inventory/Hotbar representation of each stack. */
+    private static final class MaterialIconScreen extends Screen {
+        private final List<MaterialEntry> entries;
+        private final boolean white;
+
+        MaterialIconScreen(List<MaterialEntry> entries,boolean white) {
+            super(Component.literal("Material icons"));
+            this.entries=entries;
+            this.white=white;
+        }
+
+        static int columns(int guiWidth) { return Math.max(1,(guiWidth-16)/24); }
+        static int iconX(int index,int columns) { return 8+(index%columns)*24; }
+        static int iconY(int index,int columns) { return 8+(index/columns)*24; }
+
+        @Override
+        public void extractRenderState(GuiGraphicsExtractor graphics,int mouseX,int mouseY,float partialTick) {
+            graphics.fill(0,0,width,height,white ? 0xffffffff : 0xff000000);
+            int columns=columns(width);
+            for (int i=0;i<entries.size();i++)
+                graphics.item(entries.get(i).stack,iconX(i,columns),iconY(i,columns));
+        }
+
+        @Override public boolean isPauseScreen() { return false; }
+    }
+
+    private static final class MaterialEntry {
+        final ItemStack stack;
+        final String name;
+        final long count;
+        BufferedImage icon;
+        MaterialEntry(ItemStack stack,String name,long count) {
+            this.stack=stack; this.name=name; this.count=count;
+        }
+        String name() { return name; }
+        long count() { return count; }
     }
 
     private record FrozenEntity(Entity entity, Vec3 position) {}
