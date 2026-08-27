@@ -66,6 +66,12 @@ public final class OffscreenRenderer {
     private static final long PAPER_DAY_TIME = 6000L;
     /** 32 chunks covers a 100-block structure plus the most distant axonometric camera. */
     private static final int RENDER_DISTANCE_CHUNKS = 32;
+    private static final int CAPTURE_BASE_RESOLUTION = 1536;
+    private static final int CAPTURE_MAX_RESOLUTION = 2048;
+    private static final double CAPTURE_LONG_VIEW_BOOST = 1.35;
+    private static final int CONTENT_GUTTER_X = 36;
+    private static final int CONTENT_GUTTER_Y = 48;
+    private static final double LONG_VIEW_COMPACTION = 0.75;
     private static Job job;
     private static boolean worldStartRequested;
     private static int worldSettleTicks;
@@ -103,6 +109,13 @@ public final class OffscreenRenderer {
     /** Read-only callback after vanilla LevelExtractor has populated entityRenderStates. */
     public static void diagnoseEntityExtraction(LevelRenderState state) {
         if (job != null && activeView != null) job.diagnoseEntityExtraction(state);
+    }
+
+    /** Called after the GUI renderer has composited its ItemStack atlas. */
+    public static void afterGuiRendered() {
+        Minecraft client=Minecraft.getInstance();
+        if (job!=null && job.materialCapture && job.materialFrameReady && !job.screenshotPending)
+            job.captureMaterialFrame(client);
     }
 
     private static float renderTargetAspect(Minecraft client) {
@@ -149,6 +162,7 @@ public final class OffscreenRenderer {
                 return;
             }
             View view = View.values()[Math.min(job.view, View.values().length - 1)];
+            if (job.prepareCaptureTarget(client, view)) return;
             activeView = job.cameraFor(view, client);
             client.player.setPos(activeView.position.x,
                     activeView.position.y - client.player.getEyeHeight(), activeView.position.z);
@@ -231,10 +245,11 @@ public final class OffscreenRenderer {
         final Path input, out; final Style style; final long renderTime, jobStarted;
         final double blueprintNightVision, blueprintGamma;
         boolean loaded, respawnRequested, playerSecured, screenshotPending, nightVisionApplied, passRebuildPending;
-        boolean materialCapture;
+        boolean materialCapture, materialFrameReady;
         int materialCapturePhase, materialWait, writtenSingleViews;
         long passStarted, viewStarted, materialStarted;
         int wait, view, tickCount;
+        int captureWidth, captureHeight;
         NativeImage blackPass;
         CapturePass capturePass;
         MobEffectInstance previousNightVision;
@@ -316,10 +331,8 @@ public final class OffscreenRenderer {
             CompoundTag size = region.getCompoundOrEmpty("Size");
             int sizeX=size.getIntOr("x",0),sizeY=size.getIntOr("y",0),sizeZ=size.getIntOr("z",0);
             int sx=Math.abs(sizeX),sy=Math.abs(sizeY),sz=Math.abs(sizeZ);
-            int cellSize=computeCellSize(sx,sy,sz);
-            client.getWindow().setWindowed(cellSize,cellSize);
-            client.gameRenderer.resize(cellSize,cellSize);
-            System.out.printf("DYNAMIC_CAPTURE_SIZE bounds=%dx%dx%d cellSize=%d%n",sx,sy,sz,cellSize);
+            captureWidth=client.gameRenderer.mainRenderTarget().width;
+            captureHeight=client.gameRenderer.mainRenderTarget().height;
             // Keep the render volume above normal terrain while retaining at
             // least 32 blocks of headroom inside the build-height limit.
             int originY=Math.max(160,client.level.getMaxY()-sy-64);
@@ -550,11 +563,17 @@ public final class OffscreenRenderer {
             float halfSize;
             if (isPrincipalView(view)) {
                 // All six principal views use one drawing scale.
-                // Individually fitting each view makes the sheet look aligned,
-                // but violates length/height/depth correspondence in pixels.
                 double maxSpan = Math.max(maxX - minX,
                         Math.max(maxY - minY, maxZ - minZ));
-                halfSize = (float)(maxSpan * 0.6); // 10% margin on each side
+                double contentAspect=Math.max(horizontal/Math.max(0.05,vertical),
+                        vertical/Math.max(0.05,horizontal));
+                double densityResolution=captureBaseResolution()
+                        *(contentAspect>=1.8?captureLongViewBoost():1.0);
+                densityResolution=Math.min(captureMaxResolution(),densityResolution);
+                // Derive the ortho height from framebuffer pixels so adaptive
+                // captures retain the common principal-view pixels/block scale.
+                halfSize=(float)(client.gameRenderer.mainRenderTarget().height
+                        *maxSpan*0.6/densityResolution);
             } else {
                 halfSize=(float)Math.max(vertical,horizontal/aspect);
             }
@@ -575,13 +594,50 @@ public final class OffscreenRenderer {
             return state;
         }
 
-        /** Four pixels per longest-axis block, rounded up within the 2048-4096 capture range. */
-        private static int computeCellSize(int sx,int sy,int sz) {
-            int required=Math.max(sx,Math.max(sy,sz))*4;
-            int size=2048;
-            while (size<required && size<4096) size*=2;
-            return Math.min(size,4096);
+        /** Resize the real framebuffer for each view; composite scaling never invents capture detail. */
+        boolean prepareCaptureTarget(Minecraft client, View view) {
+            CaptureSize desired=captureSizeFor(view);
+            if (captureWidth==desired.width && captureHeight==desired.height) return false;
+            captureWidth=desired.width;
+            captureHeight=desired.height;
+            client.getWindow().setWindowed(captureWidth,captureHeight);
+            client.gameRenderer.resize(captureWidth,captureHeight);
+            wait=-10;
+            System.out.printf(Locale.ROOT,
+                    "ADAPTIVE_CAPTURE_SIZE view=%s contentAspect=%.4f resolution=%dx%d base=%d max=%d longBoost=%.2f%n",
+                    view,desired.contentAspect,captureWidth,captureHeight,captureBaseResolution(),
+                    captureMaxResolution(),captureLongViewBoost());
+            return true;
         }
+
+        private CaptureSize captureSizeFor(View view) {
+            Vec3 center=new Vec3((minX+maxX)/2.0,(minY+maxY)/2.0,(minZ+maxZ)/2.0);
+            double yaw=Math.toRadians(view.yaw),pitch=Math.toRadians(view.pitch);
+            Vec3 forward=new Vec3(-Math.sin(yaw)*Math.cos(pitch),-Math.sin(pitch),Math.cos(yaw)*Math.cos(pitch));
+            Vec3 right=new Vec3(Math.cos(yaw),0,Math.sin(yaw)).normalize();
+            Vec3 up=forward.cross(right).normalize();
+            double horizontal=0,vertical=0;
+            for (double x:new double[]{minX,maxX}) for (double y:new double[]{minY,maxY})
+                for (double z:new double[]{minZ,maxZ}) {
+                    Vec3 delta=new Vec3(x,y,z).subtract(center);
+                    horizontal=Math.max(horizontal,Math.abs(delta.dot(right)));
+                    vertical=Math.max(vertical,Math.abs(delta.dot(up)));
+                }
+            double aspect=Math.max(0.05,(horizontal*2.0)/Math.max(0.1,vertical*2.0));
+            int base=captureBaseResolution(),max=captureMaxResolution();
+            boolean longView=aspect>=1.8 || aspect<=1.0/1.8;
+            int longAxis=Math.min(max,(int)Math.round(base*(longView?captureLongViewBoost():1.0)));
+            // GLFW/Xvfb can asynchronously clamp very wide/tall window shapes.
+            // Keep the framebuffer square, but allocate 1536 for ordinary views
+            // and the boosted 2048 only for content whose projected aspect is long.
+            return new CaptureSize(roundEven(longAxis),roundEven(longAxis),aspect);
+        }
+
+        private record CaptureSize(int width,int height,double contentAspect) {}
+        private static int roundEven(int value) { return Math.max(2,(value+1)&~1); }
+        private static int captureBaseResolution() { return positiveIntProperty("litematic.capture.baseResolution",CAPTURE_BASE_RESOLUTION); }
+        private static int captureMaxResolution() { return Math.max(captureBaseResolution(),positiveIntProperty("litematic.capture.maxResolution",CAPTURE_MAX_RESOLUTION)); }
+        private static double captureLongViewBoost() { return positiveDoubleProperty("litematic.capture.longViewBoost",CAPTURE_LONG_VIEW_BOOST); }
 
         void logProjection(Minecraft client, float projectionAspect) {
             View captureView=View.values()[Math.min(view,View.values().length-1)];
@@ -813,6 +869,12 @@ public final class OffscreenRenderer {
         void beginMaterialCapture(Minecraft client) {
             materialStarted = System.nanoTime();
             System.out.printf("[STEP 8] render material icons%n  - materials: %d%n", materials.size());
+            setPaperFullbright(false);
+            int iconTarget=captureBaseResolution();
+            captureWidth=iconTarget;
+            captureHeight=iconTarget;
+            client.getWindow().setWindowed(iconTarget,iconTarget);
+            client.gameRenderer.resize(iconTarget,iconTarget);
             materialCapture=true;
             materialCapturePhase=0;
             materialWait=0;
@@ -820,7 +882,12 @@ public final class OffscreenRenderer {
         }
 
         void captureMaterialsTick(Minecraft client) {
-            if (screenshotPending || ++materialWait < 5) return;
+            if (screenshotPending || materialFrameReady || ++materialWait < 5) return;
+            materialFrameReady=true;
+        }
+
+        void captureMaterialFrame(Minecraft client) {
+            materialFrameReady=false;
             screenshotPending=true;
             Screenshot.takeScreenshot(client.gameRenderer.mainRenderTarget(), image -> {
                 try {
@@ -831,12 +898,16 @@ public final class OffscreenRenderer {
                         client.setScreenAndShow(new MaterialIconScreen(materials,true));
                         image=null;
                     } else {
-                        NativeImage iconSheet=matte(materialBlackPass,image);
+                        BufferedImage rawGuiCapture=nativeToBuffered(materialBlackPass);
+                        ImageIO.write(rawGuiCapture,"PNG",out.resolve("materials_icons_gui_raw.png").toFile());
+                        rawGuiCapture.flush();
+                        BufferedImage iconSheet=materialIconSheet(materialBlackPass,image);
                         extractMaterialIcons(iconSheet,client.getWindow().getGuiScaledWidth(),
                                 client.getWindow().getGuiScaledHeight());
+                        writeRawIconStrip();
                         System.out.printf("[STEP 8] render material icons complete%n  - icons captured: %d%n  - elapsed: %d ms%n", materials.size(),
                                 (System.nanoTime() - materialStarted) / 1_000_000);
-                        iconSheet.close();
+                        iconSheet.flush();
                         materialBlackPass.close();
                         materialBlackPass=null;
                         client.setScreenAndShow(null);
@@ -859,7 +930,7 @@ public final class OffscreenRenderer {
             });
         }
 
-        void extractMaterialIcons(NativeImage sheet, int guiWidth, int guiHeight) {
+        void extractMaterialIcons(BufferedImage sheet, int guiWidth, int guiHeight) {
             double scaleX=sheet.getWidth()/(double)guiWidth;
             double scaleY=sheet.getHeight()/(double)guiHeight;
             int columns=MaterialIconScreen.columns(guiWidth);
@@ -870,9 +941,44 @@ public final class OffscreenRenderer {
                 int w=Math.max(1,(int)Math.round(16*scaleX)), h=Math.max(1,(int)Math.round(16*scaleY));
                 BufferedImage icon=new BufferedImage(w,h,BufferedImage.TYPE_INT_ARGB);
                 for (int py=0;py<h;py++) for (int px=0;px<w;px++)
-                    icon.setRGB(px,py,sheet.getPixel(Math.min(sheet.getWidth()-1,x+px),Math.min(sheet.getHeight()-1,y+py)));
+                    icon.setRGB(px,py,sheet.getRGB(Math.min(sheet.getWidth()-1,x+px),Math.min(sheet.getHeight()-1,y+py)));
                 materials.get(i).icon=icon;
             }
+        }
+
+        /** Recover unmodified GUI ItemStack RGB from black/white renders into a true ARGB sheet. */
+        private static BufferedImage materialIconSheet(NativeImage black,NativeImage white) {
+            int width=black.getWidth(),height=black.getHeight();
+            BufferedImage result=new BufferedImage(width,height,BufferedImage.TYPE_INT_ARGB);
+            for (int y=0;y<height;y++) for (int x=0;x<width;x++) {
+                int bc=black.getPixel(x,y),wc=white.getPixel(x,y);
+                int br=(bc>>>16)&255,bg=(bc>>>8)&255,bb=bc&255;
+                int[] differences={((wc>>>16)&255)-br,((wc>>>8)&255)-bg,(wc&255)-bb};
+                java.util.Arrays.sort(differences);
+                int alpha=255-Math.max(0,Math.min(255,differences[1]));
+                int red=unpremultiply(br,alpha),green=unpremultiply(bg,alpha),blue=unpremultiply(bb,alpha);
+                result.setRGB(x,y,(alpha<<24)|(red<<16)|(green<<8)|blue);
+            }
+            return result;
+        }
+
+        private static int unpremultiply(int channel,int alpha) {
+            return alpha==0?0:Math.min(255,(channel*255+alpha/2)/alpha);
+        }
+
+        private void writeRawIconStrip() throws Exception {
+            int count=Math.min(materials.size(),16),size=48;
+            BufferedImage strip=new BufferedImage(Math.max(1,count)*size,size,BufferedImage.TYPE_INT_ARGB);
+            java.awt.Graphics2D graphics=strip.createGraphics();
+            graphics.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+                    java.awt.RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+            for (int i=0;i<count;i++) if (materials.get(i).icon!=null)
+                graphics.drawImage(materials.get(i).icon,i*size,0,size,size,null);
+            graphics.dispose();
+            Path file=out.resolve("materials_icon_strip_original.png");
+            ImageIO.write(strip,"PNG",file.toFile());
+            strip.flush();
+            System.out.println("WROTE MATERIAL ICON STRIP "+file+" (original ItemStack GUI color)");
         }
 
         void finish(Minecraft client) {
@@ -998,17 +1104,42 @@ public final class OffscreenRenderer {
          * four axonometric observation quadrants occupy the sheet corners.
          */
         private void compositeEngineeringSheet(String outName, Style outputStyle) throws Exception {
-            int captureWidth = composites[0].getWidth();
-            // A 2048 capture becomes a 1024-pixel drawing cell.  This keeps
-            // four times as many pixels per view as V76's fixed 540px cells.
-            int cell = Math.max(540, captureWidth / 2);
+            int cell = Math.max(540, captureBaseResolution() / 2);
             double scale = cell / 540.0;
-            int gap = adaptiveGap(cell * 4, 10), margin = (int)Math.round(56 * scale);
+            int gutterX=(int)Math.round(positiveIntProperty("litematic.sheet.contentGutterX",CONTENT_GUTTER_X)*scale);
+            int gutterY=(int)Math.round(positiveIntProperty("litematic.sheet.contentGutterY",CONTENT_GUTTER_Y)*scale);
+            double compaction=unitDoubleProperty("litematic.sheet.longViewCompaction",LONG_VIEW_COMPACTION);
+            int margin = (int)Math.round(56 * scale);
             int titleH = (int)Math.round(82 * scale), scaleBarH = (int)Math.round(74 * scale);
             int materialRows=Math.max(1,(materials.size()+3)/4);
             int materialsH=(int)Math.round((62+materialRows*42)*scale);
-            int totalW = margin * 2 + cell * 4 + gap * 3;
-            int totalH = margin * 2 + titleH + cell * 3 + gap * 2 + scaleBarH + materialsH;
+            View[][] slots={
+                    {View.AXON_X_POS_Z_POS,View.BOTTOM_X_UP,null,View.AXON_X_NEG_Z_POS},
+                    {View.LEFT_Z_NEG,View.FRONT_X_POS,View.RIGHT_Z_POS,View.BACK_X_NEG},
+                    {View.AXON_X_POS_Z_NEG,View.TOP_X_UP,null,View.AXON_X_NEG_Z_NEG}};
+            ContentBox[][] boxes=new ContentBox[3][4];
+            int[] columnWidths=new int[4],rowHeights=new int[3];
+            for (int row=0;row<3;row++) for (int column=0;column<4;column++) {
+                View slot=slots[row][column];
+                if (slot==null) continue;
+                ContentBox sourceBox=contentBox(viewsFor(outputStyle)[slot.ordinal()]);
+                double fit=Math.min(1.0,cell/(double)Math.max(sourceBox.width(),sourceBox.height()));
+                int drawW=Math.max(1,(int)Math.round(sourceBox.width()*fit));
+                int drawH=Math.max(1,(int)Math.round(sourceBox.height()*fit));
+                boxes[row][column]=sourceBox.withDrawSize(drawW,drawH);
+                columnWidths[column]=Math.max(columnWidths[column],drawW);
+                rowHeights[row]=Math.max(rowHeights[row],drawH);
+            }
+            // Retain a fraction of the old cell breathing room, but measure all
+            // placement from the actual opaque content rather than square captures.
+            for (int i=0;i<columnWidths.length;i++)
+                columnWidths[i]=Math.max(columnWidths[i],(int)Math.round(cell*compaction));
+            for (int i=0;i<rowHeights.length;i++)
+                rowHeights[i]=Math.max(rowHeights[i],(int)Math.round(cell*compaction));
+            int contentW=java.util.Arrays.stream(columnWidths).sum()+gutterX*3;
+            int contentH=java.util.Arrays.stream(rowHeights).sum()+gutterY*2;
+            int totalW = margin * 2 + contentW;
+            int totalH = margin * 2 + titleH + contentH + scaleBarH + materialsH;
             BufferedImage canvas = new BufferedImage(totalW, totalH, BufferedImage.TYPE_INT_ARGB);
             java.awt.Graphics2D g = canvas.createGraphics();
             java.awt.Color sheetBackground = sheetBackground(outputStyle);
@@ -1020,18 +1151,15 @@ public final class OffscreenRenderer {
             g.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING,
                     java.awt.RenderingHints.VALUE_ANTIALIAS_ON);
 
-            int x0 = margin, x1 = x0 + cell + gap, x2 = x1 + cell + gap, x3 = x2 + cell + gap;
-            int y0 = margin + titleH, y1 = y0 + cell + gap, y2 = y1 + cell + gap;
-            drawViewCell(g, View.AXON_X_POS_Z_POS, x0, y0, cell, false, outputStyle);
-            drawViewCell(g, View.BOTTOM_X_UP, x1, y0, cell, false, outputStyle);
-            drawViewCell(g, View.AXON_X_NEG_Z_POS, x3, y0, cell, false, outputStyle);
-            drawViewCell(g, View.LEFT_Z_NEG, x0, y1, cell, false, outputStyle);
-            drawViewCell(g, View.FRONT_X_POS, x1, y1, cell, false, outputStyle);
-            drawViewCell(g, View.RIGHT_Z_POS, x2, y1, cell, false, outputStyle);
-            drawViewCell(g, View.BACK_X_NEG, x3, y1, cell, false, outputStyle);
-            drawViewCell(g, View.AXON_X_POS_Z_NEG, x0, y2, cell, false, outputStyle);
-            drawViewCell(g, View.TOP_X_UP, x1, y2, cell, false, outputStyle);
-            drawViewCell(g, View.AXON_X_NEG_Z_NEG, x3, y2, cell, false, outputStyle);
+            int[] columnX=new int[4],rowY=new int[3];
+            columnX[0]=margin;
+            rowY[0]=margin+titleH;
+            for (int i=1;i<4;i++) columnX[i]=columnX[i-1]+columnWidths[i-1]+gutterX;
+            for (int i=1;i<3;i++) rowY[i]=rowY[i-1]+rowHeights[i-1]+gutterY;
+            for (int row=0;row<3;row++) for (int column=0;column<4;column++) {
+                if (slots[row][column]!=null) drawViewContent(g,slots[row][column],boxes[row][column],
+                        columnX[column],rowY[row],columnWidths[column],rowHeights[row],outputStyle);
+            }
 
             java.awt.Color primary=outputStyle == Style.BLUEPRINT ? java.awt.Color.WHITE : java.awt.Color.BLACK;
             java.awt.Color secondary=outputStyle == Style.BLUEPRINT ? new java.awt.Color(232,238,244) : new java.awt.Color(101,94,84);
@@ -1049,7 +1177,8 @@ public final class OffscreenRenderer {
             double sourcePixelsPerBlock = sourcePixels / (maxSpan * 1.2);
             int barPixels = (int)Math.round(blocks * sourcePixelsPerBlock *
                     (cell / (double)sourcePixels));
-            int barY = y2 + cell + (int)Math.round(45 * scale);
+            int drawingsBottom=rowY[2]+rowHeights[2];
+            int barY = drawingsBottom + (int)Math.round(45 * scale);
             int barX = margin;
             g.setColor(primary);
             g.setStroke(new java.awt.BasicStroke((float)(3 * scale)));
@@ -1059,7 +1188,7 @@ public final class OffscreenRenderer {
             g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.PLAIN, (int)Math.round(19 * scale)));
             g.drawString(blocks + " blocks", barX, barY - (int)Math.round(14 * scale));
 
-            int materialsY=y2+cell+scaleBarH;
+            int materialsY=drawingsBottom+scaleBarH;
             drawMaterials(g,margin,materialsY,totalW-margin*2,materialsH,scale,outputStyle,primary);
 
             g.setStroke(new java.awt.BasicStroke(2f));
@@ -1070,6 +1199,34 @@ public final class OffscreenRenderer {
             ImageIO.write(canvas, "PNG", file.toFile());
             System.out.println("WROTE COMPOSITE " + file + " (" + totalW + "x" + totalH + ")");
             writeMaterialsDetail(canvas,margin,materialsY,totalW-margin*2,materialsH,outputStyle);
+        }
+
+        private record ContentBox(int x,int y,int width,int height,int drawWidth,int drawHeight) {
+            ContentBox withDrawSize(int width,int height) { return new ContentBox(x,y,this.width,this.height,width,height); }
+        }
+
+        private static ContentBox contentBox(BufferedImage image) {
+            int minX=image.getWidth(),minY=image.getHeight(),maxX=-1,maxY=-1;
+            for (int y=0;y<image.getHeight();y++) for (int x=0;x<image.getWidth();x++) {
+                if ((image.getRGB(x,y)>>>24)==0) continue;
+                minX=Math.min(minX,x);minY=Math.min(minY,y);maxX=Math.max(maxX,x);maxY=Math.max(maxY,y);
+            }
+            if (maxX<minX) return new ContentBox(0,0,1,1,1,1);
+            return new ContentBox(minX,minY,maxX-minX+1,maxY-minY+1,maxX-minX+1,maxY-minY+1);
+        }
+
+        private void drawViewContent(java.awt.Graphics2D g,View view,ContentBox box,int x,int y,
+                                     int width,int height,Style style) {
+            BufferedImage source=viewsFor(style)[view.ordinal()];
+            int drawX=x+(width-box.drawWidth())/2,drawY=y+(height-box.drawHeight())/2;
+            g.drawImage(source,drawX,drawY,drawX+box.drawWidth(),drawY+box.drawHeight(),
+                    box.x(),box.y(),box.x()+box.width(),box.y()+box.height(),null);
+            System.out.printf(Locale.ROOT,
+                    "CONTENT_LAYOUT view=%s bounds=(%d,%d %dx%d) draw=(%d,%d %dx%d) gutter=%dx%d compaction=%.2f%n",
+                    view,box.x(),box.y(),box.width(),box.height(),drawX,drawY,box.drawWidth(),box.drawHeight(),
+                    positiveIntProperty("litematic.sheet.contentGutterX",CONTENT_GUTTER_X),
+                    positiveIntProperty("litematic.sheet.contentGutterY",CONTENT_GUTTER_Y),
+                    unitDoubleProperty("litematic.sheet.longViewCompaction",LONG_VIEW_COMPACTION));
         }
 
         /** Writes a 2x nearest-neighbour proof crop for reviewing the material UI. */
@@ -1621,7 +1778,9 @@ public final class OffscreenRenderer {
             graphics.fill(0,0,width,height,white ? 0xffffffff : 0xff000000);
             int columns=columns(width);
             for (int i=0;i<entries.size();i++)
-                graphics.item(entries.get(i).stack,iconX(i,columns),iconY(i,columns));
+                // Match recipe-book/ingredient previews: resolve the GUI model
+                // without inheriting the camera player's transient render state.
+                graphics.fakeItem(entries.get(i).stack,iconX(i,columns),iconY(i,columns));
         }
 
         @Override public boolean isPauseScreen() { return false; }
