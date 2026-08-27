@@ -1119,17 +1119,35 @@ public final class OffscreenRenderer {
                     {View.AXON_X_POS_Z_NEG,View.TOP_X_UP,null,View.AXON_X_NEG_Z_NEG}};
             ContentBox[][] boxes=new ContentBox[3][4];
             int[] columnWidths=new int[4],rowHeights=new int[3];
+            double sizeX=maxX-minX,sizeY=maxY-minY,sizeZ=maxZ-minZ;
+            double maxPrincipalSpan=Math.max(sizeX,Math.max(sizeY,sizeZ));
+            double principalScale=cell/Math.max(1.0,maxPrincipalSpan);
+            System.out.printf(Locale.ROOT,
+                    "PRINCIPAL_SCALE sizeX=%.4f sizeY=%.4f sizeZ=%.4f pixelsPerBlock=%.6f%n",
+                    sizeX,sizeY,sizeZ,principalScale);
             for (int row=0;row<3;row++) for (int column=0;column<4;column++) {
                 View slot=slots[row][column];
                 if (slot==null) continue;
-                ContentBox sourceBox=contentBox(viewsFor(outputStyle)[slot.ordinal()]);
-                double fit=Math.min(1.0,cell/(double)Math.max(sourceBox.width(),sourceBox.height()));
+                BufferedImage source=viewsFor(outputStyle)[slot.ordinal()];
+                ContentBox sourceBox=contentBox(source);
+                double fit;
+                if (isPrincipalView(slot)) {
+                    // Every principal capture has the same pixels-per-block.  Scale
+                    // its cropped pixels by the same factor; the crop is only a
+                    // positioning/spacing aid and must never determine scale.
+                    double capturePixelsPerBlock=source.getHeight()/(maxPrincipalSpan*1.2);
+                    fit=principalScale/capturePixelsPerBlock;
+                } else {
+                    // Axonometric views intentionally retain their independent fit.
+                    fit=Math.min(1.0,cell/(double)Math.max(sourceBox.width(),sourceBox.height()));
+                }
                 int drawW=Math.max(1,(int)Math.round(sourceBox.width()*fit));
                 int drawH=Math.max(1,(int)Math.round(sourceBox.height()*fit));
                 boxes[row][column]=sourceBox.withDrawSize(drawW,drawH);
                 columnWidths[column]=Math.max(columnWidths[column],drawW);
                 rowHeights[row]=Math.max(rowHeights[row],drawH);
             }
+            logPrincipalViewSizes(sizeX,sizeY,sizeZ,principalScale);
             // Retain a fraction of the old cell breathing room, but measure all
             // placement from the actual opaque content rather than square captures.
             for (int i=0;i<columnWidths.length;i++)
@@ -1171,12 +1189,9 @@ public final class OffscreenRenderer {
             g.drawString("Orthographic and axonometric views · common principal-view scale", margin, margin + (int)Math.round(69 * scale));
 
             // A scale bar remains meaningful if the PNG is resized or printed.
-            double maxSpan = Math.max(maxX - minX, Math.max(maxY - minY, maxZ - minZ));
+            double maxSpan = Math.max(sizeX, Math.max(sizeY, sizeZ));
             int blocks = niceScaleBar(maxSpan);
-            int sourcePixels = composites[View.TOP_X_UP.ordinal()].getWidth();
-            double sourcePixelsPerBlock = sourcePixels / (maxSpan * 1.2);
-            int barPixels = (int)Math.round(blocks * sourcePixelsPerBlock *
-                    (cell / (double)sourcePixels));
+            int barPixels = (int)Math.round(blocks * principalScale);
             int drawingsBottom=rowY[2]+rowHeights[2];
             int barY = drawingsBottom + (int)Math.round(45 * scale);
             int barX = margin;
@@ -1199,6 +1214,24 @@ public final class OffscreenRenderer {
             ImageIO.write(canvas, "PNG", file.toFile());
             System.out.println("WROTE COMPOSITE " + file + " (" + totalW + "x" + totalH + ")");
             writeMaterialsDetail(canvas,margin,materialsY,totalW-margin*2,materialsH,outputStyle);
+        }
+
+        private void logPrincipalViewSizes(double sizeX,double sizeY,double sizeZ,double pixelsPerBlock) {
+            logPrincipalViewSize(View.FRONT_X_POS,sizeX,sizeY,pixelsPerBlock);
+            logPrincipalViewSize(View.BACK_X_NEG,sizeX,sizeY,pixelsPerBlock);
+            logPrincipalViewSize(View.LEFT_Z_NEG,sizeZ,sizeY,pixelsPerBlock);
+            logPrincipalViewSize(View.RIGHT_Z_POS,sizeZ,sizeY,pixelsPerBlock);
+            logPrincipalViewSize(View.TOP_X_UP,sizeX,sizeZ,pixelsPerBlock);
+            logPrincipalViewSize(View.BOTTOM_X_UP,sizeX,sizeZ,pixelsPerBlock);
+        }
+
+        private static void logPrincipalViewSize(View view,double worldWidth,double worldHeight,
+                                                 double pixelsPerBlock) {
+            int drawWidth=Math.max(1,(int)Math.round(worldWidth*pixelsPerBlock));
+            int drawHeight=Math.max(1,(int)Math.round(worldHeight*pixelsPerBlock));
+            System.out.printf(Locale.ROOT,
+                    "PRINCIPAL_VIEW_SIZE view=%s world=%.4fx%.4f draw=%dx%d pixelsPerBlock=%.6f%n",
+                    view,worldWidth,worldHeight,drawWidth,drawHeight,pixelsPerBlock);
         }
 
         private record ContentBox(int x,int y,int width,int height,int drawWidth,int drawHeight) {
