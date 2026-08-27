@@ -56,12 +56,20 @@ public final class OffscreenRenderer {
     private static boolean worldStartRequested;
     private static int worldSettleTicks;
     private static ViewState activeView;
+    private static volatile boolean paperFullbright;
     static {
         ClientTickEvents.END_CLIENT_TICK.register(OffscreenRenderer::tick);
     }
     private OffscreenRenderer() {}
 
-    public static void arm(String input, String output) { job = new Job(Path.of(input), Path.of(output)); }
+    public static void arm(String input, String output) {
+        setPaperFullbright(false);
+        job = new Job(Path.of(input), Path.of(output));
+    }
+
+    public static boolean isPaperFullbright() { return paperFullbright; }
+
+    public static void setPaperFullbright(boolean value) { paperFullbright = value; }
 
     /** Called after vanilla extracts the camera, but before 26.2 builds its culling frustum. */
     public static void applyProjection(CameraRenderState camera) {
@@ -115,6 +123,7 @@ public final class OffscreenRenderer {
         } catch (Exception error) {
             error.printStackTrace();
             job.clearNightVision(client);
+            setPaperFullbright(false);
             client.stop();
             job = null;
             activeView = null;
@@ -264,6 +273,7 @@ public final class OffscreenRenderer {
 
         void configureCapturePass(Minecraft client) {
             clearNightVision(client);
+            setPaperFullbright(capturePass == CapturePass.PAPER_COLOR);
             long targetTime = capturePass == CapturePass.PAPER_COLOR ? PAPER_DAY_TIME : renderTime;
             setOverworldClock(client, targetTime, 0.0f);
             long actualTime = client.level.getOverworldClockTime();
@@ -284,8 +294,8 @@ public final class OffscreenRenderer {
                         Math.max(0, (int)Math.round(nightVision)), false, false));
                 nightVisionApplied = true;
             }
-            System.out.printf("CAPTURE_PASS %s time=%d gamma=%.2f nightvision=%.2f%n",
-                    capturePass, actualTime, activeGamma(), nightVision);
+            System.out.printf("CAPTURE_PASS %s time=%d gamma=%.2f nightvision=%.2f fullbright=%s%n",
+                    capturePass, actualTime, activeGamma(), nightVision, isPaperFullbright());
         }
 
         void enforceCaptureTime(Minecraft client) {
@@ -399,6 +409,7 @@ public final class OffscreenRenderer {
                 } catch (Exception error) {
                     error.printStackTrace();
                     clearNightVision(client);
+                    setPaperFullbright(false);
                     client.stop();
                     job = null;
                     activeView = null;
@@ -420,11 +431,18 @@ public final class OffscreenRenderer {
                     capturePass = CapturePass.BLUEPRINT_EDGE;
                     view = 0;
                     configureCapturePass(client);
+                    client.levelRenderer.invalidateCompiledGeometry(
+                            client.level,client.options,client.gameRenderer.mainCamera(),client.getBlockColors());
+                    // Fullbright and directional shading are baked into chunk
+                    // meshes. Give the async rebuild a full settling window
+                    // before taking the first black matte pass for blueprint.
+                    wait = -120;
                     return;
                 }
                 assembleComposites();
                 closeCapturedViews();
                 clearNightVision(client);
+                setPaperFullbright(false);
                 client.options.gamma().set(previousGamma);
                 setOverworldClock(client, previousDayTime, 1.0f);
                 System.out.println("LITEMATIC_RENDER_DONE " + out);
@@ -541,16 +559,16 @@ public final class OffscreenRenderer {
 
             int x0 = margin, x1 = x0 + cell + gap, x2 = x1 + cell + gap, x3 = x2 + cell + gap;
             int y0 = margin + titleH, y1 = y0 + cell + gap, y2 = y1 + cell + gap;
-            drawViewCell(g, View.AXON_X_POS_Z_POS, x0, y0, cell, "AXON +X +Z", false, sheetBackground, outputStyle);
-            drawViewCell(g, View.BOTTOM_X_UP, x1, y0, cell, "BOTTOM (+X UP)", false, sheetBackground, outputStyle);
-            drawViewCell(g, View.AXON_X_NEG_Z_POS, x3, y0, cell, "AXON -X +Z", false, sheetBackground, outputStyle);
-            drawViewCell(g, View.LEFT_Z_NEG, x0, y1, cell, "RIGHT (-Z LOOK)", false, sheetBackground, outputStyle);
-            drawViewCell(g, View.FRONT_X_POS, x1, y1, cell, "FRONT (+X)", false, sheetBackground, outputStyle);
-            drawViewCell(g, View.RIGHT_Z_POS, x2, y1, cell, "LEFT (V72)", false, sheetBackground, outputStyle);
-            drawViewCell(g, View.BACK_X_NEG, x3, y1, cell, "BACK (-X)", false, sheetBackground, outputStyle);
-            drawViewCell(g, View.AXON_X_POS_Z_NEG, x0, y2, cell, "AXON +X -Z", false, sheetBackground, outputStyle);
-            drawViewCell(g, View.TOP_X_UP, x1, y2, cell, "TOP (+X UP)", false, sheetBackground, outputStyle);
-            drawViewCell(g, View.AXON_X_NEG_Z_NEG, x3, y2, cell, "AXON -X -Z", false, sheetBackground, outputStyle);
+            drawViewCell(g, View.AXON_X_POS_Z_POS, x0, y0, cell, "AXON +X +Z", false, outputStyle);
+            drawViewCell(g, View.BOTTOM_X_UP, x1, y0, cell, "BOTTOM (+X UP)", false, outputStyle);
+            drawViewCell(g, View.AXON_X_NEG_Z_POS, x3, y0, cell, "AXON -X +Z", false, outputStyle);
+            drawViewCell(g, View.LEFT_Z_NEG, x0, y1, cell, "RIGHT (-Z LOOK)", false, outputStyle);
+            drawViewCell(g, View.FRONT_X_POS, x1, y1, cell, "FRONT (+X)", false, outputStyle);
+            drawViewCell(g, View.RIGHT_Z_POS, x2, y1, cell, "LEFT (V72)", false, outputStyle);
+            drawViewCell(g, View.BACK_X_NEG, x3, y1, cell, "BACK (-X)", false, outputStyle);
+            drawViewCell(g, View.AXON_X_POS_Z_NEG, x0, y2, cell, "AXON +X -Z", false, outputStyle);
+            drawViewCell(g, View.TOP_X_UP, x1, y2, cell, "TOP (+X UP)", false, outputStyle);
+            drawViewCell(g, View.AXON_X_NEG_Z_NEG, x3, y2, cell, "AXON -X -Z", false, outputStyle);
 
             g.setColor(java.awt.Color.BLACK);
             g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.BOLD, (int)Math.round(34 * scale)));
@@ -606,13 +624,7 @@ public final class OffscreenRenderer {
 
         private void drawViewCell(java.awt.Graphics2D g, View view, int x, int y,
                                   int size, String label, boolean rotateCounterClockwise,
-                                  java.awt.Color background, Style style) {
-            // Cover the sheet grid before drawing the transparent edge layer.
-            g.setColor(background);
-            g.fillRect(x, y, size, size);
-            g.setColor(new java.awt.Color(107, 98, 86));
-            g.setStroke(new java.awt.BasicStroke(2.0f));
-            g.drawRect(x, y, size, size);
+                                  Style style) {
             BufferedImage source = viewsFor(style)[view.ordinal()];
             if (rotateCounterClockwise) {
                 java.awt.Graphics2D rotated = (java.awt.Graphics2D)g.create();

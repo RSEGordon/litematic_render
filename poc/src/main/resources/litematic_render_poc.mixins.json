@@ -3,6 +3,10 @@
   "package": "com.rsegordon.poc.mixin",
   "compatibilityLevel": "JAVA_25",
   "client": [
+    "BlockModelLighterMixin",
+    "BlockModelLighterCacheMixin",
+    "CardinalLightingMixin",
+    "FluidRendererMixin",
     "GameRendererMixin",
     "WorldRendererMixin"
   ],
