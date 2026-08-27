@@ -26,6 +26,8 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntitySpawnRequest;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
@@ -102,7 +104,14 @@ public final class OffscreenRenderer {
             if (job.screenshotPending) return;
             if (job.wait < 5) return;
             job.requestCapture(client, view);
-        } catch (Exception error) { error.printStackTrace(); client.stop(); job = null; activeView = null; worldSettleTicks = 0; }
+        } catch (Exception error) {
+            error.printStackTrace();
+            job.clearNightVision(client);
+            client.stop();
+            job = null;
+            activeView = null;
+            worldSettleTicks = 0;
+        }
     }
 
     /**
@@ -139,13 +148,21 @@ public final class OffscreenRenderer {
     private record ViewState(Vec3 position, float halfSize, float farPlane) {}
 
     private static final class Job {
-        final Path input, out; final Style style; boolean loaded, screenshotPending; int wait, view; NativeImage blackPass;
+        final Path input, out; final Style style; final long renderTime; final double nightVision;
+        boolean loaded, screenshotPending, nightVisionApplied; int wait, view; NativeImage blackPass;
+        MobEffectInstance previousNightVision;
         double minX, minY, minZ, maxX, maxY, maxZ;
         final List<FrozenEntity> frozenEntities=new ArrayList<>();
         int nextEntityId = -1000;
         // Per-view saved native image (post alpha matting) for composite assembly
         final NativeImage[] composites = new NativeImage[View.values().length];
-        Job(Path input, Path out) { this.input=input; this.out=out; this.style=Style.configured(); }
+        Job(Path input, Path out) {
+            this.input=input;
+            this.out=out;
+            this.style=Style.configured();
+            this.renderTime=configuredRenderTime();
+            this.nightVision=unitDoubleProperty("litematic.render.nightvision", 1.0);
+        }
 
         void load(Minecraft client) throws Exception {
             CompoundTag root = NbtIo.readCompressed(input, NbtAccounter.unlimitedHeap());
@@ -216,14 +233,24 @@ public final class OffscreenRenderer {
             // to the edge detector instead of trying to brighten an encoded PNG.
             client.options.gamma().set(positiveDoubleProperty("litematic.render.gamma", 1.0));
             client.options.renderDistance().set(RENDER_DISTANCE_CHUNKS);
+            client.level.setTimeFromServer(renderTime);
+            if (nightVision > 0.0) {
+                MobEffectInstance current = client.player.getEffect(MobEffects.NIGHT_VISION);
+                if (current != null) previousNightVision = new MobEffectInstance(current);
+                client.player.addEffect(new MobEffectInstance(
+                        MobEffects.NIGHT_VISION, Integer.MAX_VALUE,
+                        Math.max(0, (int)Math.round(nightVision)), false, false));
+                nightVisionApplied = true;
+            }
             // Recreate section geometry with the safe 26.2 path. Unlike
             // resetLevelRenderData(), this waits for the occlusion graph reset
             // before the next extraction and includes newly non-empty sections.
             client.levelRenderer.invalidateCompiledGeometry(
                     client.level,client.options,client.gameRenderer.mainCamera(),client.getBlockColors());
             loaded=true;
-            System.out.printf("Loaded %dx%dx%d palette=%d tiles=%d entities=%d bounds=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]%n",
-                    sx,sy,sz,palette.size(),tiles.size(),entityCount,minX,minY,minZ,maxX,maxY,maxZ);
+            System.out.printf("Loaded %dx%dx%d palette=%d tiles=%d entities=%d time=%d nightvision=%.2f bounds=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]%n",
+                    sx,sy,sz,palette.size(),tiles.size(),entityCount,renderTime,nightVision,
+                    minX,minY,minZ,maxX,maxY,maxZ);
         }
 
         void include(AABB box) {
@@ -309,14 +336,15 @@ public final class OffscreenRenderer {
                     if (style.writesBlueprint()) {
                         BufferedImage blueprint = blueprintEffect(color);
                         blueprintViews[view.ordinal()] = blueprint;
-                        writeSingleView(blueprint, out.resolve(baseName + ".png"), Style.BLUEPRINT);
+                        writeSingleView(blueprint, out.resolve(baseName + ".png"));
                     }
                     if (style.writesPaper()) {
-                        writeSingleView(color, out.resolve(baseName + "_paper.png"), Style.PAPER);
+                        writeSingleView(color, out.resolve(baseName + "_paper.png"));
                     }
                     viewComplete(client);
                 } catch (Exception error) {
                     error.printStackTrace();
+                    clearNightVision(client);
                     client.stop();
                     job = null;
                     activeView = null;
@@ -336,6 +364,7 @@ public final class OffscreenRenderer {
             if (view == View.values().length) {
                 assembleComposites();
                 closeCapturedViews();
+                clearNightVision(client);
                 System.out.println("LITEMATIC_RENDER_DONE " + out);
                 client.stop();
                 job = null;
@@ -343,6 +372,14 @@ public final class OffscreenRenderer {
                 worldStartRequested = false;
                 worldSettleTicks = 0;
             }
+        }
+
+        void clearNightVision(Minecraft client) {
+            if (!nightVisionApplied || client.player == null) return;
+            client.player.removeEffect(MobEffects.NIGHT_VISION);
+            if (previousNightVision != null) client.player.addEffect(previousNightVision);
+            previousNightVision = null;
+            nightVisionApplied = false;
         }
 
         private void closeCapturedViews() {
@@ -574,16 +611,10 @@ public final class OffscreenRenderer {
             return outputStyle == Style.PAPER ? colorViews : blueprintViews;
         }
 
-        private static void writeSingleView(BufferedImage source, Path file, Style outputStyle) throws Exception {
-            BufferedImage canvas = new BufferedImage(source.getWidth(), source.getHeight(), BufferedImage.TYPE_INT_ARGB);
-            java.awt.Graphics2D g = canvas.createGraphics();
-            g.setColor(sheetBackground(outputStyle));
-            g.fillRect(0, 0, canvas.getWidth(), canvas.getHeight());
-            drawEngineeringGrid(g, canvas.getWidth(), canvas.getHeight(), outputStyle);
-            g.drawImage(source, 0, 0, null);
-            g.dispose();
-            ImageIO.write(canvas, "PNG", file.toFile());
-            canvas.flush();
+        private static void writeSingleView(BufferedImage source, Path file) throws Exception {
+            // Single views are bare transparent assets. Sheet background, grid,
+            // border, labels and scale furniture belong only to composites.
+            ImageIO.write(source, "PNG", file.toFile());
             System.out.println("WROTE " + file);
         }
 
@@ -737,6 +768,33 @@ public final class OffscreenRenderer {
             } catch (NumberFormatException ignored) {
                 return fallback;
             }
+        }
+
+        private static double unitDoubleProperty(String name, double fallback) {
+            try {
+                return Math.max(0.0, Math.min(1.0,
+                        Double.parseDouble(System.getProperty(name, Double.toString(fallback)))));
+            } catch (NumberFormatException ignored) {
+                return fallback;
+            }
+        }
+
+        private static long configuredRenderTime() {
+            String value = System.getProperty("litematic.render.time", "noon").trim().toLowerCase(Locale.ROOT);
+            return switch (value) {
+                case "day" -> 1000L;
+                case "noon" -> 6000L;
+                case "night" -> 13000L;
+                case "midnight" -> 18000L;
+                default -> {
+                    try {
+                        yield Long.parseLong(value);
+                    } catch (NumberFormatException error) {
+                        throw new IllegalArgumentException("Invalid litematic.render.time='" + value
+                                + "' (expected day, noon, night, midnight, or a tick number)", error);
+                    }
+                }
+            };
         }
 
         private static int colorProperty(String name, int fallback) {
