@@ -920,6 +920,8 @@ public final class OffscreenRenderer {
                         Path workbook = MaterialWorkbookWriter.write(out, input.getFileName().toString(),
                                 materials.stream().map(entry -> new MaterialWorkbookWriter.Row(entry.name, entry.count)).toList());
                         System.out.println("WROTE MATERIAL WORKBOOK " + workbook.toAbsolutePath());
+                        Path archive = OutputArchiveWriter.write(out, workbook);
+                        System.out.println("WROTE OUTPUT ARCHIVE " + archive.toAbsolutePath());
                         finish(client);
                     }
                 } catch (Exception error) {
@@ -1082,14 +1084,16 @@ public final class OffscreenRenderer {
             paths.add(out.resolve("mcoo_3view" + suffix + ".png").toAbsolutePath().toString());
             paths.add(out.resolve("mcoo_4angle" + suffix + ".png").toAbsolutePath().toString());
             paths.add(out.resolve("mcoo_overview" + suffix + ".png").toAbsolutePath().toString());
+            paths.add(out.resolve("mcoo_overview" + suffix + "_no_materials.png").toAbsolutePath().toString());
         }
 
         private void assembleStyle(Style outputStyle, String suffix) throws Exception {
-            compositeEngineeringSheet("mcoo_3view" + suffix + ".png", outputStyle);
+            compositeEngineeringSheet("mcoo_3view" + suffix + ".png", outputStyle, true);
             compositeStrip(new View[]{View.AXON_X_POS_Z_NEG, View.AXON_X_POS_Z_POS,
                             View.AXON_X_NEG_Z_POS, View.AXON_X_NEG_Z_NEG},
                     "mcoo_4angle" + suffix + ".png", outputStyle);
             compositeOverview(suffix);
+            compositeEngineeringSheet("mcoo_overview" + suffix + "_no_materials.png", outputStyle, false);
         }
 
         private void compositeOverview(String suffix) throws Exception {
@@ -1108,7 +1112,7 @@ public final class OffscreenRenderer {
          * layout rather than claiming first- or third-angle conformance.  The
          * four axonometric observation quadrants occupy the sheet corners.
          */
-        private void compositeEngineeringSheet(String outName, Style outputStyle) throws Exception {
+        private void compositeEngineeringSheet(String outName, Style outputStyle, boolean includeMaterials) throws Exception {
             int cell = Math.max(540, captureBaseResolution() / 2);
             double scale = cell / 540.0;
             int gutterX=(int)Math.round(positiveIntProperty("litematic.sheet.contentGutterX",CONTENT_GUTTER_X)*scale);
@@ -1162,7 +1166,7 @@ public final class OffscreenRenderer {
             int contentW=java.util.Arrays.stream(columnWidths).sum()+gutterX*3;
             int contentH=java.util.Arrays.stream(rowHeights).sum()+gutterY*2;
             int totalW = margin * 2 + contentW;
-            int totalH = margin * 2 + titleH + contentH + scaleBarH + materialsH;
+            int totalH = margin * 2 + titleH + contentH + scaleBarH + (includeMaterials ? materialsH : 0);
             BufferedImage canvas = new BufferedImage(totalW, totalH, BufferedImage.TYPE_INT_ARGB);
             java.awt.Graphics2D g = canvas.createGraphics();
             java.awt.Color sheetBackground = sheetBackground(outputStyle);
@@ -1209,7 +1213,8 @@ public final class OffscreenRenderer {
             g.drawString(blocks + " blocks", barX, barY - (int)Math.round(14 * scale));
 
             int materialsY=drawingsBottom+scaleBarH;
-            drawMaterials(g,margin,materialsY,totalW-margin*2,materialsH,scale,outputStyle,primary);
+            if (includeMaterials)
+                drawMaterials(g,margin,materialsY,totalW-margin*2,materialsH,scale,outputStyle,primary);
 
             g.setStroke(new java.awt.BasicStroke(2f));
             g.setColor(outputStyle == Style.BLUEPRINT ? java.awt.Color.WHITE : new java.awt.Color(78,72,64));
@@ -1218,7 +1223,8 @@ public final class OffscreenRenderer {
             Path file = out.resolve(outName);
             ImageIO.write(canvas, "PNG", file.toFile());
             System.out.println("WROTE COMPOSITE " + file + " (" + totalW + "x" + totalH + ")");
-            writeMaterialsDetail(canvas,margin,materialsY,totalW-margin*2,materialsH,outputStyle);
+            if (includeMaterials)
+                writeMaterialsDetail(canvas,margin,materialsY,totalW-margin*2,materialsH,outputStyle);
         }
 
         private void logPrincipalViewSizes(double sizeX,double sizeY,double sizeZ,double pixelsPerBlock) {
