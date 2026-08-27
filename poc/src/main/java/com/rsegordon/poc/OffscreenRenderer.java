@@ -316,6 +316,10 @@ public final class OffscreenRenderer {
             CompoundTag size = region.getCompoundOrEmpty("Size");
             int sizeX=size.getIntOr("x",0),sizeY=size.getIntOr("y",0),sizeZ=size.getIntOr("z",0);
             int sx=Math.abs(sizeX),sy=Math.abs(sizeY),sz=Math.abs(sizeZ);
+            int cellSize=computeCellSize(sx,sy,sz);
+            client.getWindow().setWindowed(cellSize,cellSize);
+            client.gameRenderer.resize(cellSize,cellSize);
+            System.out.printf("DYNAMIC_CAPTURE_SIZE bounds=%dx%dx%d cellSize=%d%n",sx,sy,sz,cellSize);
             // Keep the render volume above normal terrain while retaining at
             // least 32 blocks of headroom inside the build-height limit.
             int originY=Math.max(160,client.level.getMaxY()-sy-64);
@@ -558,15 +562,25 @@ public final class OffscreenRenderer {
             // Orthographic scale is independent of camera distance. Stay just
             // outside the complete bounds so its chunks remain inside the
             // client's render distance even when entities make the bounds wide.
-            double distance=radius+8.0;
+            double distance=Math.max(radius*1.05,radius+0.5);
             Vec3 position=center.subtract(forward.scale(distance));
             float farPlane=(float)Math.max(256.0,distance+radius+32.0);
             ViewState state=new ViewState(position,halfSize,farPlane);
             System.out.printf(Locale.ROOT,
-                    "CAMERA_VIEW view=%s position=Vec3(%.4f,%.4f,%.4f) halfSize=%.4f farPlane=%.4f elapsed=%dms%n",
-                    view,state.position.x,state.position.y,state.position.z,state.halfSize,state.farPlane,
+                    "CAMERA_VIEW view=%s center=Vec3(%.4f,%.4f,%.4f) position=Vec3(%.4f,%.4f,%.4f) "
+                            + "radius=%.4f distance=%.4f halfSize=%.4f farPlane=%.4f elapsed=%dms%n",
+                    view,center.x,center.y,center.z,state.position.x,state.position.y,state.position.z,
+                    radius,distance,state.halfSize,state.farPlane,
                     (System.nanoTime() - jobStarted) / 1_000_000);
             return state;
+        }
+
+        /** Four pixels per longest-axis block, rounded up within the 2048-4096 capture range. */
+        private static int computeCellSize(int sx,int sy,int sz) {
+            int required=Math.max(sx,Math.max(sy,sz))*4;
+            int size=2048;
+            while (size<required && size<4096) size*=2;
+            return Math.min(size,4096);
         }
 
         void logProjection(Minecraft client, float projectionAspect) {
