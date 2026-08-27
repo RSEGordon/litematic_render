@@ -112,6 +112,7 @@ public final class OffscreenRenderer {
 
     private static void tick(Minecraft client) {
         if (job == null) return;
+        job.logTickProgress();
         if (client.level == null) {
             if (!client.isGameLoadFinished() || client.gui.overlay() != null) return;
             if (!worldStartRequested) {
@@ -141,6 +142,7 @@ public final class OffscreenRenderer {
             if (!job.loaded && worldSettleTicks++ < 200) return;
             if (!job.loaded) { job.load(client); return; }
             job.enforceCaptureTime(client);
+            job.logEntityTickDiagnostic();
             job.freezeEntities();
             if (job.materialCapture) {
                 job.captureMaterialsTick(client);
@@ -232,7 +234,7 @@ public final class OffscreenRenderer {
         boolean materialCapture;
         int materialCapturePhase, materialWait, writtenSingleViews;
         long passStarted, viewStarted, materialStarted;
-        int wait, view;
+        int wait, view, tickCount;
         NativeImage blackPass;
         CapturePass capturePass;
         MobEffectInstance previousNightVision;
@@ -513,6 +515,19 @@ public final class OffscreenRenderer {
             }
         }
 
+        void logTickProgress() {
+            tickCount++;
+            if (tickCount % 100 == 0) {
+                System.out.printf("TICK_PROGRESS ticks=%d/2000 elapsed=%ds%n",
+                        tickCount, (System.nanoTime() - jobStarted) / 1_000_000_000);
+            }
+        }
+
+        void logEntityTickDiagnostic() {
+            System.out.printf("ENTITY_TICK_DIAG time=%dms entityCount=%d%n",
+                    (System.nanoTime() - jobStarted) / 1_000_000, frozenEntities.size());
+        }
+
         ViewState cameraFor(View view, Minecraft client) {
             Vec3 center=new Vec3((minX+maxX)/2.0,(minY+maxY)/2.0,(minZ+maxZ)/2.0);
             double yaw=Math.toRadians(view.yaw), pitch=Math.toRadians(view.pitch);
@@ -546,7 +561,12 @@ public final class OffscreenRenderer {
             double distance=radius+8.0;
             Vec3 position=center.subtract(forward.scale(distance));
             float farPlane=(float)Math.max(256.0,distance+radius+32.0);
-            return new ViewState(position,halfSize,farPlane);
+            ViewState state=new ViewState(position,halfSize,farPlane);
+            System.out.printf(Locale.ROOT,
+                    "CAMERA_VIEW view=%s position=Vec3(%.4f,%.4f,%.4f) halfSize=%.4f farPlane=%.4f elapsed=%dms%n",
+                    view,state.position.x,state.position.y,state.position.z,state.halfSize,state.farPlane,
+                    (System.nanoTime() - jobStarted) / 1_000_000);
+            return state;
         }
 
         void logProjection(Minecraft client, float projectionAspect) {
@@ -672,6 +692,7 @@ public final class OffscreenRenderer {
         void requestBlackPass(Minecraft client) {
             View captureView = View.values()[Math.min(view, View.values().length - 1)];
             viewStarted = System.nanoTime();
+            System.out.printf("PASS_START pass=%s view=%s%n", capturePass, captureView);
             System.out.printf("[STEP 5] capture views%n  - pass: %s%n  - view: %s%n  - status: started%n",
                     capturePass, captureView.name());
             screenshotPending = true;
@@ -730,11 +751,15 @@ public final class OffscreenRenderer {
                     if (!retainImage) image.close();
                     System.out.printf("[STEP 5] capture views%n  - pass: %s%n  - view: %s%n  - status: OK%n  - elapsed: %d ms%n",
                             capturePass, view.name(), (System.nanoTime() - viewStarted) / 1_000_000);
+                    System.out.printf("PASS_END pass=%s view=%s elapsed=%dms%n",
+                            capturePass, view.name(), (System.nanoTime() - viewStarted) / 1_000_000);
                     viewComplete(client);
                 } catch (Exception error) {
                     System.out.printf("[STEP 5] capture views%n  - pass: %s%n  - view: %s%n  - status: failed%n  - elapsed: %d ms%n  - message: %s%n",
                             capturePass, view.name(), (System.nanoTime() - viewStarted) / 1_000_000,
                             error.getMessage());
+                    System.out.printf("PASS_END pass=%s view=%s elapsed=%dms status=failed%n",
+                            capturePass, view.name(), (System.nanoTime() - viewStarted) / 1_000_000);
                     error.printStackTrace();
                     clearNightVision(client);
                     setPaperFullbright(false);
