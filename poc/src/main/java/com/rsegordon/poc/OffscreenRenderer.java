@@ -83,10 +83,14 @@ public final class OffscreenRenderer {
     private OffscreenRenderer() {}
 
     public static void arm(String input, String output) {
+        arm(input, output, null);
+    }
+
+    public static void arm(String input, String output, String title) {
         setPaperFullbright(false);
-        job = new Job(Path.of(input), Path.of(output));
-        System.out.printf("LITEMATIC_RENDER_ARMED input=%s output=%s style=%s%n",
-                job.input.toAbsolutePath(), job.out.toAbsolutePath(), job.style);
+        job = new Job(Path.of(input), Path.of(output), title);
+        System.out.printf("LITEMATIC_RENDER_ARMED input=%s output=%s title=%s style=%s%n",
+                job.input.toAbsolutePath(), job.out.toAbsolutePath(), job.sheetTitle(), job.style);
     }
 
     public static boolean isPaperFullbright() { return paperFullbright; }
@@ -242,7 +246,7 @@ public final class OffscreenRenderer {
     private record ViewState(Vec3 position, float halfSize, float farPlane) {}
 
     private static final class Job {
-        final Path input, out; final Style style; final long renderTime, jobStarted;
+        final Path input, out; final String title; final Style style; final long renderTime, jobStarted;
         final double blueprintNightVision, blueprintGamma;
         boolean loaded, respawnRequested, playerSecured, screenshotPending, nightVisionApplied, passRebuildPending;
         boolean materialCapture, materialFrameReady;
@@ -263,9 +267,10 @@ public final class OffscreenRenderer {
         String lastEntityDiagnosticKey, lastProjectionDiagnosticKey;
         // Per-view saved native image (post alpha matting) for composite assembly
         final NativeImage[] composites = new NativeImage[View.values().length];
-        Job(Path input, Path out) {
+        Job(Path input, Path out, String title) {
             this.input=input;
             this.out=out;
+            this.title=title;
             this.jobStarted=System.nanoTime();
             this.style=Style.configured();
             this.renderTime=configuredRenderTime();
@@ -1332,7 +1337,7 @@ public final class OffscreenRenderer {
         }
 
         private String sheetTitle() {
-            String name=input.getFileName().toString();
+            String name=title == null || title.isBlank() ? input.getFileName().toString() : title;
             return name.toLowerCase(Locale.ROOT).endsWith(".litematic")
                     ? name.substring(0,name.length()-".litematic".length()) : name;
         }

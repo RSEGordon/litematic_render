@@ -4,6 +4,7 @@ import json
 import gzip
 import os
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -164,7 +165,13 @@ def _run(task_id):
         return
     output = Path(task["output_dir"])
     log_file = output / "render.log"
-    args = f'{task["source_path"]} {output} --width 1024 --height 1024 --username RenderBot --accessToken 0 --uuid 00000000-0000-0000-0000-000000000001'
+    args = shlex.join([
+        task["source_path"], str(output),
+        "--title", task["filename"],
+        "--width", "1024", "--height", "1024",
+        "--username", "RenderBot", "--accessToken", "0",
+        "--uuid", "00000000-0000-0000-0000-000000000001",
+    ])
     command = [
         "systemd-run", "--user", "--scope", "--quiet",
         "-p", "MemoryHigh=12G", "-p", "MemoryMax=14G", "-p", "OOMPolicy=continue",

@@ -16,11 +16,13 @@ public final class LitematicRenderMod implements ClientModInitializer {
         int inputIndex = positionalInputIndex(args);
         String input = inputIndex >= 0 ? args[inputIndex] : null;
         String output = positionalOutput(args, inputIndex);
+        String title = optionValue(args, "--title");
         if (input == null) input = System.getProperty("litematic.input");
         if (output == null) output = System.getProperty("litematic.output");
-        System.out.printf("[STEP 1] parse args%n  - input: %s%n  - output: %s%n  - elapsed: %d ms%n",
-                input, output, (System.nanoTime() - parseStarted) / 1_000_000);
-        if (input != null && output != null) OffscreenRenderer.arm(input, output);
+        if (title == null) title = System.getProperty("litematic.title");
+        System.out.printf("[STEP 1] parse args%n  - input: %s%n  - output: %s%n  - title: %s%n  - elapsed: %d ms%n",
+                input, output, title, (System.nanoTime() - parseStarted) / 1_000_000);
+        if (input != null && output != null) OffscreenRenderer.arm(input, output, title);
         else System.out.println("[STEP ERROR] missing input or output path; renderer not armed");
     }
 
@@ -63,5 +65,13 @@ public final class LitematicRenderMod implements ClientModInitializer {
         } catch (InvalidPathException ignored) {
             return null;
         }
+    }
+
+    private static String optionValue(String[] args, String option) {
+        for (int i = 0; i < args.length; i++) {
+            if (args[i].equals(option) && i + 1 < args.length) return args[i + 1];
+            if (args[i].startsWith(option + "=")) return args[i].substring(option.length() + 1);
+        }
+        return null;
     }
 }
