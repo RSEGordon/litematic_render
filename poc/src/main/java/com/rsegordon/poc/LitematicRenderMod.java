@@ -9,6 +9,7 @@ import net.fabricmc.loader.api.FabricLoader;
 
 public final class LitematicRenderMod implements ClientModInitializer {
     @Override public void onInitializeClient() {
+        long parseStarted = System.nanoTime();
         LitematicRenderCommand.register();
         String[] args = FabricLoader.getInstance().getLaunchArguments(false);
         int inputIndex = positionalInputIndex(args);
@@ -16,7 +17,10 @@ public final class LitematicRenderMod implements ClientModInitializer {
         String output = positionalOutput(args, inputIndex);
         if (input == null) input = System.getProperty("litematic.input");
         if (output == null) output = System.getProperty("litematic.output");
+        System.out.printf("[STEP 1] parse args%n  - input: %s%n  - output: %s%n  - elapsed: %d ms%n",
+                input, output, (System.nanoTime() - parseStarted) / 1_000_000);
         if (input != null && output != null) OffscreenRenderer.arm(input, output);
+        else System.out.println("[STEP ERROR] missing input or output path; renderer not armed");
     }
 
     private static int positionalInputIndex(String[] args) {

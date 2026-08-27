@@ -73,6 +73,8 @@ public final class OffscreenRenderer {
     public static void arm(String input, String output) {
         setPaperFullbright(false);
         job = new Job(Path.of(input), Path.of(output));
+        System.out.printf("LITEMATIC_RENDER_ARMED input=%s output=%s style=%s%n",
+                job.input.toAbsolutePath(), job.out.toAbsolutePath(), job.style);
     }
 
     public static boolean isPaperFullbright() { return paperFullbright; }
@@ -98,7 +100,8 @@ public final class OffscreenRenderer {
             if (!worldStartRequested) {
                 worldStartRequested = true;
                 client.options.renderDistance().set(RENDER_DISTANCE_CHUNKS);
-                System.out.println("LITEMATIC_RENDER_STARTING_WORLD World");
+                System.out.println("LITEMATIC_RENDER_STARTING_WORLD World renderDistance="
+                        + RENDER_DISTANCE_CHUNKS);
                 client.createWorldOpenFlows().openWorld("World", () -> client.setScreenAndShow(new TitleScreen()));
             }
             return;
@@ -147,6 +150,8 @@ public final class OffscreenRenderer {
             if (job.wait < 5) return;
             job.requestCapture(client, view);
         } catch (Exception error) {
+            System.out.printf("[STEP ERROR] render failed%n  - type: %s%n  - message: %s%n",
+                    error.getClass().getName(), error.getMessage());
             error.printStackTrace();
             job.clearNightVision(client);
             setPaperFullbright(false);
@@ -195,11 +200,12 @@ public final class OffscreenRenderer {
     private record ViewState(Vec3 position, float halfSize, float farPlane) {}
 
     private static final class Job {
-        final Path input, out; final Style style; final long renderTime;
+        final Path input, out; final Style style; final long renderTime, jobStarted;
         final double blueprintNightVision, blueprintGamma;
         boolean loaded, screenshotPending, nightVisionApplied, passRebuildPending;
         boolean materialCapture;
-        int materialCapturePhase, materialWait;
+        int materialCapturePhase, materialWait, writtenSingleViews;
+        long passStarted, viewStarted, materialStarted;
         int wait, view;
         NativeImage blackPass;
         CapturePass capturePass;
@@ -216,6 +222,7 @@ public final class OffscreenRenderer {
         Job(Path input, Path out) {
             this.input=input;
             this.out=out;
+            this.jobStarted=System.nanoTime();
             this.style=Style.configured();
             this.renderTime=configuredRenderTime();
             this.blueprintNightVision=unitDoubleProperty("litematic.render.nightvision", 1.0);
@@ -224,6 +231,9 @@ public final class OffscreenRenderer {
         }
 
         void load(Minecraft client) throws Exception {
+            long loadStarted = System.nanoTime();
+            System.out.printf("[STEP 2] load litematic%n  - input: %s%n  - size: %d bytes%n",
+                    input.toAbsolutePath(), Files.size(input));
             // Material names are part of the deliverable, rather than UI chrome.
             // Load vanilla Simplified Chinese translations before resolving the
             // ItemStack hover names so the result is independent of options.txt.
@@ -317,13 +327,14 @@ public final class OffscreenRenderer {
             client.levelRenderer.invalidateCompiledGeometry(
                     client.level,client.options,client.gameRenderer.mainCamera(),client.getBlockColors());
             loaded=true;
-            System.out.printf("Loaded %dx%dx%d palette=%d tiles=%d entities=%d time=%d pass=%s gamma=%.2f nightvision=%.2f bounds=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]%n",
-                    sx,sy,sz,palette.size(),tiles.size(),entityCount,renderTime,capturePass,
-                    activeGamma(),activeNightVision(),
+            System.out.printf("  - loaded: %dx%dx%d palette=%d tiles=%d entities=%d%n  - elapsed: %d ms%n  - bounds: [%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]%n",
+                    sx,sy,sz,palette.size(),tiles.size(),entityCount,
+                    (System.nanoTime()-loadStarted)/1_000_000,
                     minX,minY,minZ,maxX,maxY,maxZ);
         }
 
         void configureCapturePass(Minecraft client) {
+            passStarted = System.nanoTime();
             clearNightVision(client);
             setPaperFullbright(capturePass == CapturePass.PAPER_COLOR);
             long targetTime = capturePass == CapturePass.PAPER_COLOR ? PAPER_DAY_TIME : renderTime;
@@ -346,8 +357,18 @@ public final class OffscreenRenderer {
                         Math.max(0, (int)Math.round(nightVision)), false, false));
                 nightVisionApplied = true;
             }
-            System.out.printf("CAPTURE_PASS %s time=%d gamma=%.2f nightvision=%.2f fullbright=%s%n",
-                    capturePass, actualTime, activeGamma(), nightVision, isPaperFullbright());
+            int step = capturePass == CapturePass.PAPER_COLOR ? 3 : 4;
+            if (capturePass == CapturePass.PAPER_COLOR) {
+                System.out.printf("[STEP %d] capture PAPER_COLOR%n  - time: %d%n  - gamma: %.2f%n  - fullbright: %s%n  - elapsed: %d ms%n",
+                        step, actualTime, activeGamma(), isPaperFullbright(),
+                        (System.nanoTime() - passStarted) / 1_000_000);
+            } else {
+                System.out.printf("[STEP %d] capture BLUEPRINT_EDGE%n  - time: %d%n  - gamma: %.2f%n  - fullbright: %s%n  - noise minPixels: %d%n  - noise radius: %d%n  - elapsed: %d ms%n",
+                        step, actualTime, activeGamma(), isPaperFullbright(),
+                        positiveIntProperty("litematic.blueprint.noise.minPixels", 6),
+                        nonNegativeIntProperty("litematic.blueprint.noise.radius", 1),
+                        (System.nanoTime() - passStarted) / 1_000_000);
+            }
         }
 
         void enforceCaptureTime(Minecraft client) {
@@ -417,6 +438,10 @@ public final class OffscreenRenderer {
         }
 
         void requestBlackPass(Minecraft client) {
+            View captureView = View.values()[Math.min(view, View.values().length - 1)];
+            viewStarted = System.nanoTime();
+            System.out.printf("[STEP 5] capture views%n  - pass: %s%n  - view: %s%n  - status: started%n",
+                    capturePass, captureView.name());
             screenshotPending = true;
             Screenshot.takeScreenshot(client.gameRenderer.mainRenderTarget(), image -> {
                 blackPass = image;
@@ -445,11 +470,16 @@ public final class OffscreenRenderer {
                     if (retainImage) composites[view.ordinal()] = image;
                     BufferedImage color = nativeToBuffered(image);
                     String baseName = "mcoo_" + view.name().toLowerCase(Locale.ROOT);
+                    long writeStarted = System.nanoTime();
                     if (capturePass == CapturePass.BLUEPRINT_EDGE) {
                         BufferedImage gammaCorrected = applyGamma(color, blueprintGamma);
                         BufferedImage blueprint = blueprintEffect(gammaCorrected);
                         blueprintViews[view.ordinal()] = blueprint;
                         writeSingleView(blueprint, out.resolve(baseName + ".png"));
+                        writtenSingleViews++;
+                        System.out.printf("[STEP 6] write single views%n  - count: %d%n  - path: %s%n  - elapsed: %d ms%n",
+                                writtenSingleViews, out.resolve(baseName + ".png").toAbsolutePath(),
+                                (System.nanoTime() - writeStarted) / 1_000_000);
                         gammaCorrected.flush();
                         color.flush();
                     } else {
@@ -459,11 +489,20 @@ public final class OffscreenRenderer {
                                 positiveDoubleProperty("litematic.paper.saturation",1.00));
                         colorViews[view.ordinal()] = adjusted;
                         writeSingleView(adjusted, out.resolve(baseName + "_paper.png"));
+                        writtenSingleViews++;
+                        System.out.printf("[STEP 6] write single views%n  - count: %d%n  - path: %s%n  - elapsed: %d ms%n",
+                                writtenSingleViews, out.resolve(baseName + "_paper.png").toAbsolutePath(),
+                                (System.nanoTime() - writeStarted) / 1_000_000);
                         color.flush();
                     }
                     if (!retainImage) image.close();
+                    System.out.printf("[STEP 5] capture views%n  - pass: %s%n  - view: %s%n  - status: OK%n  - elapsed: %d ms%n",
+                            capturePass, view.name(), (System.nanoTime() - viewStarted) / 1_000_000);
                     viewComplete(client);
                 } catch (Exception error) {
+                    System.out.printf("[STEP 5] capture views%n  - pass: %s%n  - view: %s%n  - status: failed%n  - elapsed: %d ms%n  - message: %s%n",
+                            capturePass, view.name(), (System.nanoTime() - viewStarted) / 1_000_000,
+                            error.getMessage());
                     error.printStackTrace();
                     clearNightVision(client);
                     setPaperFullbright(false);
@@ -501,6 +540,8 @@ public final class OffscreenRenderer {
         }
 
         void beginMaterialCapture(Minecraft client) {
+            materialStarted = System.nanoTime();
+            System.out.printf("[STEP 8] render material icons%n  - materials: %d%n", materials.size());
             materialCapture=true;
             materialCapturePhase=0;
             materialWait=0;
@@ -522,6 +563,8 @@ public final class OffscreenRenderer {
                         NativeImage iconSheet=matte(materialBlackPass,image);
                         extractMaterialIcons(iconSheet,client.getWindow().getGuiScaledWidth(),
                                 client.getWindow().getGuiScaledHeight());
+                        System.out.printf("[STEP 8] render material icons complete%n  - icons captured: %d%n  - elapsed: %d ms%n", materials.size(),
+                                (System.nanoTime() - materialStarted) / 1_000_000);
                         iconSheet.close();
                         materialBlackPass.close();
                         materialBlackPass=null;
@@ -530,6 +573,8 @@ public final class OffscreenRenderer {
                         finish(client);
                     }
                 } catch (Exception error) {
+                    System.out.printf("[STEP ERROR] material/composite render failed%n  - message: %s%n",
+                            error.getMessage());
                     error.printStackTrace();
                     client.stop();
                     job=null;
@@ -562,6 +607,8 @@ public final class OffscreenRenderer {
                 setPaperFullbright(false);
                 client.options.gamma().set(previousGamma);
                 setOverworldClock(client, previousDayTime, 1.0f);
+                System.out.printf("[STEP 9] done%n  - output: %s%n  - total elapsed: %d ms%n",
+                        out.toAbsolutePath(), (System.nanoTime() - jobStarted) / 1_000_000);
                 System.out.println("LITEMATIC_RENDER_DONE " + out);
                 client.stop();
                 job = null;
@@ -630,8 +677,26 @@ public final class OffscreenRenderer {
 
         /** Build the two composites and write them out. */
         void assembleComposites() throws Exception {
+            long started = System.nanoTime();
+            System.out.printf("[STEP 7] build composites%n  - title: %s%n  - output directory: %s%n",
+                    sheetTitle(), out.toAbsolutePath());
             if (style.writesBlueprint()) assembleStyle(Style.BLUEPRINT, "");
             if (style.writesPaper()) assembleStyle(Style.PAPER, "_paper");
+            System.out.printf("  - outputs: %s%n  - elapsed: %d ms%n",
+                    compositeOutputPaths(), (System.nanoTime() - started) / 1_000_000);
+        }
+
+        private String compositeOutputPaths() {
+            List<String> paths = new ArrayList<>();
+            if (style.writesBlueprint()) addCompositeOutputPaths(paths, "");
+            if (style.writesPaper()) addCompositeOutputPaths(paths, "_paper");
+            return String.join(", ", paths);
+        }
+
+        private void addCompositeOutputPaths(List<String> paths, String suffix) {
+            paths.add(out.resolve("mcoo_3view" + suffix + ".png").toAbsolutePath().toString());
+            paths.add(out.resolve("mcoo_4angle" + suffix + ".png").toAbsolutePath().toString());
+            paths.add(out.resolve("mcoo_overview" + suffix + ".png").toAbsolutePath().toString());
         }
 
         private void assembleStyle(Style outputStyle, String suffix) throws Exception {
