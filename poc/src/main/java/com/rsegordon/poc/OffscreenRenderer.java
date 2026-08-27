@@ -224,6 +224,13 @@ public final class OffscreenRenderer {
         }
 
         void load(Minecraft client) throws Exception {
+            // Material names are part of the deliverable, rather than UI chrome.
+            // Load vanilla Simplified Chinese translations before resolving the
+            // ItemStack hover names so the result is independent of options.txt.
+            if (!"zh_cn".equals(client.getLanguageManager().getSelected())) {
+                client.getLanguageManager().setSelected("zh_cn");
+                client.getLanguageManager().onResourceManagerReload(client.getResourceManager());
+            }
             CompoundTag root = NbtIo.readCompressed(input, NbtAccounter.unlimitedHeap());
             CompoundTag regions = root.getCompoundOrEmpty("Regions");
             if (regions.keySet().isEmpty()) throw new IllegalArgumentException("No litematic regions");
@@ -446,10 +453,12 @@ public final class OffscreenRenderer {
                         gammaCorrected.flush();
                         color.flush();
                     } else {
-                        BufferedImage contrasted=applyContrast(color,
-                                positiveDoubleProperty("litematic.paper.contrast",1.08));
-                        colorViews[view.ordinal()] = contrasted;
-                        writeSingleView(contrasted, out.resolve(baseName + "_paper.png"));
+                        BufferedImage adjusted=applyPaperColor(color,
+                                positiveDoubleProperty("litematic.paper.brightness",0.97),
+                                positiveDoubleProperty("litematic.paper.contrast",1.05),
+                                positiveDoubleProperty("litematic.paper.saturation",1.00));
+                        colorViews[view.ordinal()] = adjusted;
+                        writeSingleView(adjusted, out.resolve(baseName + "_paper.png"));
                         color.flush();
                     }
                     if (!retainImage) image.close();
@@ -656,11 +665,11 @@ public final class OffscreenRenderer {
             int cell = Math.max(540, captureWidth / 2);
             double scale = cell / 540.0;
             int gap = (int)Math.round(42 * scale), margin = (int)Math.round(56 * scale);
-            int titleH = (int)Math.round(82 * scale), footerH = (int)Math.round(82 * scale);
+            int titleH = (int)Math.round(82 * scale), scaleBarH = (int)Math.round(74 * scale);
             int materialRows=Math.max(1,(materials.size()+3)/4);
-            int materialsH=(int)Math.round((52+materialRows*42)*scale);
+            int materialsH=(int)Math.round((62+materialRows*42)*scale);
             int totalW = margin * 2 + cell * 4 + gap * 3;
-            int totalH = margin * 2 + titleH + cell * 3 + gap * 2 + materialsH + footerH;
+            int totalH = margin * 2 + titleH + cell * 3 + gap * 2 + scaleBarH + materialsH;
             BufferedImage canvas = new BufferedImage(totalW, totalH, BufferedImage.TYPE_INT_ARGB);
             java.awt.Graphics2D g = canvas.createGraphics();
             java.awt.Color sheetBackground = sheetBackground(outputStyle);
@@ -694,9 +703,6 @@ public final class OffscreenRenderer {
             g.setColor(secondary);
             g.drawString("Orthographic and axonometric views · common principal-view scale", margin, margin + (int)Math.round(69 * scale));
 
-            int materialsY=y2+cell+(int)Math.round(28*scale);
-            drawMaterials(g,margin,materialsY,totalW-margin*2,scale,primary);
-
             // A scale bar remains meaningful if the PNG is resized or printed.
             double maxSpan = Math.max(maxX - minX, Math.max(maxY - minY, maxZ - minZ));
             int blocks = niceScaleBar(maxSpan);
@@ -704,7 +710,7 @@ public final class OffscreenRenderer {
             double sourcePixelsPerBlock = sourcePixels / (maxSpan * 1.2);
             int barPixels = (int)Math.round(blocks * sourcePixelsPerBlock *
                     (cell / (double)sourcePixels));
-            int barY = totalH - margin - (int)Math.round(35 * scale);
+            int barY = y2 + cell + (int)Math.round(45 * scale);
             int barX = margin;
             g.setColor(primary);
             g.setStroke(new java.awt.BasicStroke((float)(3 * scale)));
@@ -713,6 +719,9 @@ public final class OffscreenRenderer {
             g.drawLine(barX + barPixels, barY - (int)Math.round(8 * scale), barX + barPixels, barY + (int)Math.round(8 * scale));
             g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.PLAIN, (int)Math.round(19 * scale)));
             g.drawString(blocks + " blocks", barX, barY - (int)Math.round(14 * scale));
+
+            int materialsY=y2+cell+scaleBarH;
+            drawMaterials(g,margin,materialsY,totalW-margin*2,materialsH,scale,outputStyle,primary);
 
             g.setStroke(new java.awt.BasicStroke(2f));
             g.setColor(outputStyle == Style.BLUEPRINT ? java.awt.Color.WHITE : new java.awt.Color(78,72,64));
@@ -727,11 +736,20 @@ public final class OffscreenRenderer {
             int size = nonNegativeIntProperty("litematic.sheet.grid.size", 64);
             if (size == 0) return;
             java.awt.Color fallback = style == Style.PAPER
-                    ? new java.awt.Color(210, 205, 195) : new java.awt.Color(125, 145, 165);
-            g.setColor(rgbProperty("litematic.sheet.grid.color", fallback));
-            g.setStroke(new java.awt.BasicStroke(1f));
-            for (int x = size; x < width; x += size) g.drawLine(x, 0, x, height);
-            for (int y = size; y < height; y += size) g.drawLine(0, y, width, y);
+                    ? new java.awt.Color(210, 205, 195) : new java.awt.Color(58, 82, 112);
+            java.awt.Color minor=rgbProperty("litematic.sheet.grid.color", fallback);
+            java.awt.Color major=style == Style.PAPER ? new java.awt.Color(194,188,177)
+                    : new java.awt.Color(72,99,132);
+            for (int x = size, n=1; x < width; x += size,n++) {
+                g.setColor(n%4==0 ? major : minor);
+                g.setStroke(new java.awt.BasicStroke(n%4==0 ? 1.35f : 1f));
+                g.drawLine(x,0,x,height);
+            }
+            for (int y = size, n=1; y < height; y += size,n++) {
+                g.setColor(n%4==0 ? major : minor);
+                g.setStroke(new java.awt.BasicStroke(n%4==0 ? 1.35f : 1f));
+                g.drawLine(0,y,width,y);
+            }
         }
 
         private static java.awt.Color sheetBackground(Style style) {
@@ -763,27 +781,38 @@ public final class OffscreenRenderer {
                     ? name.substring(0,name.length()-".litematic".length()) : name;
         }
 
-        private void drawMaterials(java.awt.Graphics2D g, int x, int y, int width,
-                                   double scale, java.awt.Color textColor) {
+        private void drawMaterials(java.awt.Graphics2D g, int x, int y, int width, int height,
+                                   double scale, Style style, java.awt.Color textColor) {
             int heading=(int)Math.round(22*scale), rowH=(int)Math.round(42*scale);
-            int iconSize=(int)Math.round(28*scale), columnW=width/4;
+            int panelPad=(int)Math.round(18*scale), iconSize=(int)Math.round(28*scale);
+            int columnGap=(int)Math.round(32*scale);
+            int columnW=(width-panelPad*2-columnGap*3)/4;
+            g.setColor(style == Style.BLUEPRINT ? new java.awt.Color(10,35,75,190)
+                    : new java.awt.Color(238,232,216,235));
+            g.fillRoundRect(x,y,width,height,(int)Math.round(10*scale),(int)Math.round(10*scale));
+            g.setColor(style == Style.BLUEPRINT ? new java.awt.Color(255,255,255,210)
+                    : new java.awt.Color(145,137,123));
+            g.setStroke(new java.awt.BasicStroke((float)Math.max(1.0,1.2*scale)));
+            g.drawRoundRect(x,y,width-1,height-1,(int)Math.round(10*scale),(int)Math.round(10*scale));
             g.setColor(textColor);
             g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF,java.awt.Font.BOLD,heading));
-            g.drawString("MATERIALS",x,y+heading);
+            g.drawString("Materials",x+panelPad,y+panelPad+heading);
             int rows=Math.max(1,(materials.size()+3)/4);
             g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF,java.awt.Font.PLAIN,(int)Math.round(17*scale)));
             for (int i=0;i<materials.size();i++) {
                 int column=i/rows, row=i%rows;
-                int cellX=x+column*columnW, cellY=y+(int)Math.round(34*scale)+row*rowH;
+                int cellX=x+panelPad+column*(columnW+columnGap);
+                int cellY=y+panelPad+(int)Math.round(32*scale)+row*rowH;
                 MaterialEntry entry=materials.get(i);
                 if (entry.icon != null) g.drawImage(entry.icon,cellX,cellY,iconSize,iconSize,null);
                 int textX=cellX+iconSize+(int)Math.round(10*scale);
                 int baseline=cellY+(int)Math.round(21*scale);
                 String quantity=Long.toString(entry.count);
                 java.awt.FontMetrics fm=g.getFontMetrics();
-                int quantityX=cellX+columnW-(int)Math.round(12*scale)-fm.stringWidth(quantity);
-                int available=Math.max(10,quantityX-textX-(int)Math.round(10*scale));
+                int quantityGap=(int)Math.round(8*scale);
+                int available=Math.max(10,columnW-(textX-cellX)-fm.stringWidth(quantity)-quantityGap);
                 String name=fitText(entry.name,fm,available);
+                int quantityX=textX+fm.stringWidth(name)+quantityGap;
                 g.setColor(textColor);
                 g.drawString(name,textX,baseline);
                 g.drawString(quantity,quantityX,baseline);
@@ -868,20 +897,28 @@ public final class OffscreenRenderer {
             return corrected;
         }
 
-        private static BufferedImage applyContrast(BufferedImage source, double contrast) {
+        private static BufferedImage applyPaperColor(BufferedImage source, double brightness,
+                                                     double contrast, double saturation) {
             int width=source.getWidth(),height=source.getHeight();
             BufferedImage result=new BufferedImage(width,height,BufferedImage.TYPE_INT_ARGB);
             for (int y=0;y<height;y++) for (int x=0;x<width;x++) {
                 int pixel=source.getRGB(x,y),alpha=pixel>>>24;
-                int red=contrastChannel((pixel>>>16)&255,contrast);
-                int green=contrastChannel((pixel>>>8)&255,contrast);
-                int blue=contrastChannel(pixel&255,contrast);
-                result.setRGB(x,y,(alpha<<24)|(red<<16)|(green<<8)|blue);
+                double red=((pixel>>>16)&255)*brightness;
+                double green=((pixel>>>8)&255)*brightness;
+                double blue=(pixel&255)*brightness;
+                double luminance=red*0.2126+green*0.7152+blue*0.0722;
+                red=luminance+(red-luminance)*saturation;
+                green=luminance+(green-luminance)*saturation;
+                blue=luminance+(blue-luminance)*saturation;
+                int redOut=contrastChannel(red,contrast);
+                int greenOut=contrastChannel(green,contrast);
+                int blueOut=contrastChannel(blue,contrast);
+                result.setRGB(x,y,(alpha<<24)|(redOut<<16)|(greenOut<<8)|blueOut);
             }
             return result;
         }
 
-        private static int contrastChannel(int value,double contrast) {
+        private static int contrastChannel(double value,double contrast) {
             return Math.max(0,Math.min(255,(int)Math.round(128+(value-128)*contrast)));
         }
 
@@ -977,17 +1014,22 @@ public final class OffscreenRenderer {
             int dilateKernel = positiveIntProperty("litematic.blueprint.dilate.kernel", 1);
             int dilateIterations = nonNegativeIntProperty("litematic.blueprint.dilate.iterations", 0);
             BufferedImage result = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
-            java.awt.Graphics2D graphics = result.createGraphics();
-            graphics.setColor(BLUEPRINT_LINE);
             for (int y = 0; y < height; y++) {
                 for (int x = 0; x < width; x++) {
                     if (edges.getRaster().getSample(x, y, 0) != 0) {
+                        // Strong Canny responses carry the main silhouette and
+                        // major structure. Hysteresis-only detail stays finer
+                        // and translucent, giving the drawing an actual line
+                        // hierarchy instead of an equally-white edge cloud.
+                        int alpha=edgeClass[y*width+x] == 2 ? 255 : 150;
+                        result.setRGB(x,y,(alpha<<24)|0x00ffffff);
                         int grown = 1 + dilateIterations * (dilateKernel - 1);
-                        graphics.fillRect(x, y, grown, grown);
+                        if (grown>1) for (int dy=0;dy<grown && y+dy<height;dy++)
+                            for (int dx=0;dx<grown && x+dx<width;dx++)
+                                result.setRGB(x+dx,y+dy,(alpha<<24)|0x00ffffff);
                     }
                 }
             }
-            graphics.dispose();
             return result;
         }
 
