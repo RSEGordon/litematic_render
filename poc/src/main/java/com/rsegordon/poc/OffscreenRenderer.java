@@ -145,12 +145,19 @@ public final class OffscreenRenderer {
         boolean writesPaper() { return this != BLUEPRINT; }
     }
 
+    private enum CapturePass {
+        PAPER_COLOR, BLUEPRINT_EDGE
+    }
+
     private record ViewState(Vec3 position, float halfSize, float farPlane) {}
 
     private static final class Job {
-        final Path input, out; final Style style; final long renderTime; final double nightVision;
+        final Path input, out; final Style style; final long renderTime;
+        final double blueprintNightVision, blueprintGamma;
         boolean loaded, screenshotPending, nightVisionApplied; int wait, view; NativeImage blackPass;
+        CapturePass capturePass;
         MobEffectInstance previousNightVision;
+        double previousGamma;
         double minX, minY, minZ, maxX, maxY, maxZ;
         final List<FrozenEntity> frozenEntities=new ArrayList<>();
         int nextEntityId = -1000;
@@ -161,7 +168,9 @@ public final class OffscreenRenderer {
             this.out=out;
             this.style=Style.configured();
             this.renderTime=configuredRenderTime();
-            this.nightVision=unitDoubleProperty("litematic.render.nightvision", 1.0);
+            this.blueprintNightVision=unitDoubleProperty("litematic.render.nightvision", 1.0);
+            this.blueprintGamma=positiveDoubleProperty("litematic.render.gamma", 2.5);
+            this.capturePass=style.writesPaper() ? CapturePass.PAPER_COLOR : CapturePass.BLUEPRINT_EDGE;
         }
 
         void load(Minecraft client) throws Exception {
@@ -228,12 +237,29 @@ public final class OffscreenRenderer {
             Files.createDirectories(out);
             if (!client.gui.hud.isHidden()) client.gui.hud.toggle();
             client.options.fov().set(50);
-            // Use Minecraft's supported brightness control while the actual
-            // framebuffer is rendered. This exposes face and texture contrast
-            // to the edge detector instead of trying to brighten an encoded PNG.
-            client.options.gamma().set(positiveDoubleProperty("litematic.render.gamma", 1.0));
+            previousGamma = client.options.gamma().get();
             client.options.renderDistance().set(RENDER_DISTANCE_CHUNKS);
             client.level.setTimeFromServer(renderTime);
+            configureCapturePass(client);
+            // Recreate section geometry with the safe 26.2 path. Unlike
+            // resetLevelRenderData(), this waits for the occlusion graph reset
+            // before the next extraction and includes newly non-empty sections.
+            client.levelRenderer.invalidateCompiledGeometry(
+                    client.level,client.options,client.gameRenderer.mainCamera(),client.getBlockColors());
+            loaded=true;
+            System.out.printf("Loaded %dx%dx%d palette=%d tiles=%d entities=%d time=%d pass=%s gamma=%.2f nightvision=%.2f bounds=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]%n",
+                    sx,sy,sz,palette.size(),tiles.size(),entityCount,renderTime,capturePass,
+                    activeGamma(),activeNightVision(),
+                    minX,minY,minZ,maxX,maxY,maxZ);
+        }
+
+        void configureCapturePass(Minecraft client) {
+            clearNightVision(client);
+            // Vanilla 26.2 constrains the Brightness option to 0..1. Keep its
+            // neutral value here; BLUEPRINT_EDGE applies the requested render
+            // gamma directly to the captured RGBA pixels below.
+            client.options.gamma().set(1.0);
+            double nightVision = activeNightVision();
             if (nightVision > 0.0) {
                 MobEffectInstance current = client.player.getEffect(MobEffects.NIGHT_VISION);
                 if (current != null) previousNightVision = new MobEffectInstance(current);
@@ -242,15 +268,16 @@ public final class OffscreenRenderer {
                         Math.max(0, (int)Math.round(nightVision)), false, false));
                 nightVisionApplied = true;
             }
-            // Recreate section geometry with the safe 26.2 path. Unlike
-            // resetLevelRenderData(), this waits for the occlusion graph reset
-            // before the next extraction and includes newly non-empty sections.
-            client.levelRenderer.invalidateCompiledGeometry(
-                    client.level,client.options,client.gameRenderer.mainCamera(),client.getBlockColors());
-            loaded=true;
-            System.out.printf("Loaded %dx%dx%d palette=%d tiles=%d entities=%d time=%d nightvision=%.2f bounds=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]%n",
-                    sx,sy,sz,palette.size(),tiles.size(),entityCount,renderTime,nightVision,
-                    minX,minY,minZ,maxX,maxY,maxZ);
+            System.out.printf("CAPTURE_PASS %s gamma=%.2f nightvision=%.2f%n",
+                    capturePass, activeGamma(), nightVision);
+        }
+
+        double activeGamma() {
+            return capturePass == CapturePass.PAPER_COLOR ? 1.0 : blueprintGamma;
+        }
+
+        double activeNightVision() {
+            return capturePass == CapturePass.PAPER_COLOR ? 0.0 : blueprintNightVision;
         }
 
         void include(AABB box) {
@@ -329,18 +356,22 @@ public final class OffscreenRenderer {
                     System.out.printf("MATTE %s corners black=%08x white=%08x%n",
                             view.name(), blackPassBackup.getPixel(0, 0), whitePass.getPixel(0, 0));
                     NativeImage image = matte(blackPassBackup, whitePass);
-                    composites[view.ordinal()] = image;
+                    boolean retainImage = composites[view.ordinal()] == null;
+                    if (retainImage) composites[view.ordinal()] = image;
                     BufferedImage color = nativeToBuffered(image);
-                    colorViews[view.ordinal()] = color;
                     String baseName = "mcoo_" + view.name().toLowerCase(Locale.ROOT);
-                    if (style.writesBlueprint()) {
-                        BufferedImage blueprint = blueprintEffect(color);
+                    if (capturePass == CapturePass.BLUEPRINT_EDGE) {
+                        BufferedImage gammaCorrected = applyGamma(color, blueprintGamma);
+                        BufferedImage blueprint = blueprintEffect(gammaCorrected);
                         blueprintViews[view.ordinal()] = blueprint;
                         writeSingleView(blueprint, out.resolve(baseName + ".png"));
-                    }
-                    if (style.writesPaper()) {
+                        gammaCorrected.flush();
+                        color.flush();
+                    } else {
+                        colorViews[view.ordinal()] = color;
                         writeSingleView(color, out.resolve(baseName + "_paper.png"));
                     }
+                    if (!retainImage) image.close();
                     viewComplete(client);
                 } catch (Exception error) {
                     error.printStackTrace();
@@ -362,9 +393,16 @@ public final class OffscreenRenderer {
             view++;
             wait = 0;
             if (view == View.values().length) {
+                if (capturePass == CapturePass.PAPER_COLOR && style.writesBlueprint()) {
+                    capturePass = CapturePass.BLUEPRINT_EDGE;
+                    view = 0;
+                    configureCapturePass(client);
+                    return;
+                }
                 assembleComposites();
                 closeCapturedViews();
                 clearNightVision(client);
+                client.options.gamma().set(previousGamma);
                 System.out.println("LITEMATIC_RENDER_DONE " + out);
                 client.stop();
                 job = null;
@@ -614,7 +652,14 @@ public final class OffscreenRenderer {
         private static void writeSingleView(BufferedImage source, Path file) throws Exception {
             // Single views are bare transparent assets. Sheet background, grid,
             // border, labels and scale furniture belong only to composites.
-            ImageIO.write(source, "PNG", file.toFile());
+            BufferedImage bare = new BufferedImage(
+                    source.getWidth(), source.getHeight(), BufferedImage.TYPE_INT_ARGB);
+            int[] pixels = source.getRGB(0, 0, source.getWidth(), source.getHeight(),
+                    null, 0, source.getWidth());
+            bare.setRGB(0, 0, source.getWidth(), source.getHeight(),
+                    pixels, 0, source.getWidth());
+            ImageIO.write(bare, "PNG", file.toFile());
+            bare.flush();
             System.out.println("WROTE " + file);
         }
 
@@ -631,6 +676,25 @@ public final class OffscreenRenderer {
                 }
             }
             return bi;
+        }
+
+        private static BufferedImage applyGamma(BufferedImage source, double gamma) {
+            int width = source.getWidth(), height = source.getHeight();
+            BufferedImage corrected = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+            double exponent = 1.0 / gamma;
+            int[] lookup = new int[256];
+            for (int value = 0; value < lookup.length; value++) {
+                lookup[value] = (int)Math.round(255.0 * Math.pow(value / 255.0, exponent));
+            }
+            for (int y = 0; y < height; y++) for (int x = 0; x < width; x++) {
+                int pixel = source.getRGB(x, y);
+                int alpha = pixel >>> 24;
+                int red = lookup[(pixel >>> 16) & 255];
+                int green = lookup[(pixel >>> 8) & 255];
+                int blue = lookup[pixel & 255];
+                corrected.setRGB(x, y, (alpha << 24) | (red << 16) | (green << 8) | blue);
+            }
+            return corrected;
         }
 
         /**
@@ -656,9 +720,9 @@ public final class OffscreenRenderer {
             new ColorConvertOp(ColorSpace.getInstance(ColorSpace.CS_GRAY), null)
                     .filter(opaque, gray);
 
-            int bilateralD = oddPositiveIntProperty("litematic.blueprint.bilateral.d", 7);
-            double sigmaColor = positiveDoubleProperty("litematic.blueprint.bilateral.sigmaColor", 35.0);
-            double sigmaSpace = positiveDoubleProperty("litematic.blueprint.bilateral.sigmaSpace", 35.0);
+            int bilateralD = oddPositiveIntProperty("litematic.blueprint.bilateral.d", 3);
+            double sigmaColor = positiveDoubleProperty("litematic.blueprint.bilateral.sigmaColor", 1.5);
+            double sigmaSpace = positiveDoubleProperty("litematic.blueprint.bilateral.sigmaSpace", 5.0);
             // Low-memory bilateral approximation: spatial Gaussian strength is
             // controlled by sigmaSpace; sigmaColor controls how much smoothing
             // is mixed back into the original luminance.
@@ -677,9 +741,9 @@ public final class OffscreenRenderer {
             byte[] edgeClass = new byte[width * height];
             int[] sobelX = {-1, 0, 1, -2, 0, 2, -1, 0, 1};
             int[] sobelY = {-1, -2, -1, 0, 0, 0, 1, 2, 1};
-            int cannyLow = positiveIntProperty("litematic.blueprint.canny.low", 40);
+            int cannyLow = positiveIntProperty("litematic.blueprint.canny.low", 3);
             int cannyHigh = Math.max(cannyLow,
-                    positiveIntProperty("litematic.blueprint.canny.high", 110));
+                    positiveIntProperty("litematic.blueprint.canny.high", 12));
             for (int y = 1; y < height - 1; y++) {
                 for (int x = 1; x < width - 1; x++) {
                     int gx = 0;
@@ -718,8 +782,8 @@ public final class OffscreenRenderer {
                 }
             }
 
-            int dilateKernel = positiveIntProperty("litematic.blueprint.dilate.kernel", 2);
-            int dilateIterations = nonNegativeIntProperty("litematic.blueprint.dilate.iterations", 1);
+            int dilateKernel = positiveIntProperty("litematic.blueprint.dilate.kernel", 1);
+            int dilateIterations = nonNegativeIntProperty("litematic.blueprint.dilate.iterations", 0);
             BufferedImage result = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
             java.awt.Graphics2D graphics = result.createGraphics();
             graphics.setColor(BLUEPRINT_LINE);
