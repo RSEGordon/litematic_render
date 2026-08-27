@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import gzip
+import hashlib
 import os
 import re
 import shlex
@@ -16,11 +17,10 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from flask import Blueprint, abort, jsonify, redirect, render_template, request, send_file, url_for
-from werkzeug.utils import secure_filename
-
 POC_ROOT = Path(__file__).resolve().parents[2]
-OUTPUT_ROOT = Path(os.environ.get("LITEMATIC_RENDER_OUTPUT", "/tmp/poc_v103"))
-TASKS_FILE = OUTPUT_ROOT / "tasks.json"
+LITEMATIC_DIR = Path("/home/rsegordon/桌面/OpenClawFile/FileShare/工具/combined/litematic")
+RAW_DIR = LITEMATIC_DIR / "raw"
+TASKS_FILE = LITEMATIC_DIR / "tasks.json"
 JAVA_HOME = Path(os.environ.get("LITEMATIC_RENDER_JAVA_HOME", "/opt/java/jdk-25.0.1"))
 _lock = threading.RLock()
 _render_lock = threading.Lock()
@@ -29,7 +29,7 @@ bp = Blueprint("litematic_render", __name__, template_folder="templates")
 
 def register(app):
     """Register the three-level UI and upload API on combined_app5's port."""
-    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
     if bp.name not in app.blueprints:
         app.register_blueprint(bp)
 
@@ -43,7 +43,7 @@ def _read_tasks():
 
 
 def _write_tasks(tasks):
-    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    LITEMATIC_DIR.mkdir(parents=True, exist_ok=True)
     temporary = TASKS_FILE.with_suffix(".tmp")
     temporary.write_text(json.dumps(tasks, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(TASKS_FILE)
@@ -225,14 +225,24 @@ def upload():
     if not uploaded.filename.lower().endswith(".litematic"):
         return jsonify({"error": "只支持 .litematic 文件"}), 400
     task_id = uuid.uuid4().hex[:12]
-    output = OUTPUT_ROOT / task_id
-    output.mkdir(parents=True)
     original_name = Path(uploaded.filename).name
-    stored_name = secure_filename(original_name) or "upload.litematic"
-    if not stored_name.lower().endswith(".litematic"):
-        stored_name += ".litematic"
-    source = output / stored_name
-    uploaded.save(source)
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = RAW_DIR / f".{task_id}.upload"
+    uploaded.save(temporary)
+    with temporary.open("rb") as upload_data:
+        digest = hashlib.file_digest(upload_data, "sha256").hexdigest()[:8]
+    with _lock:
+        source = RAW_DIR / original_name
+        output = LITEMATIC_DIR / source.stem
+        if source.exists() or output.exists():
+            source = RAW_DIR / f"{Path(original_name).stem}_{digest}.litematic"
+            output = LITEMATIC_DIR / source.stem
+        if source.exists() or output.exists():
+            source = RAW_DIR / f"{Path(original_name).stem}_{digest}_{task_id}.litematic"
+            output = LITEMATIC_DIR / source.stem
+        temporary.replace(source)
+        output.mkdir(parents=True, exist_ok=False)
+    stored_name = source.name
     task = {
         "id": task_id, "filename": original_name, "stored_name": stored_name,
         "source_path": str(source), "output_dir": str(output), "size": source.stat().st_size,
