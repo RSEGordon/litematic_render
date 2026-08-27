@@ -31,10 +31,16 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import javax.imageio.ImageIO;
+import java.awt.color.ColorSpace;
+import java.awt.image.ColorConvertOp;
+import java.awt.image.ConvolveOp;
 import java.awt.image.BufferedImage;
+import java.awt.image.Kernel;
 
 /** Minimal proof: populate a ClientWorld, let the normal WorldRenderer draw it, copy its framebuffer. */
 public final class OffscreenRenderer {
+    private static final java.awt.Color BLUEPRINT_BACKGROUND = new java.awt.Color(18, 50, 95);
+    private static final java.awt.Color BLUEPRINT_LINE = new java.awt.Color(225, 245, 245);
     /** 32 chunks covers a 100-block structure plus the most distant axonometric camera. */
     private static final int RENDER_DISTANCE_CHUNKS = 32;
     private static Job job;
@@ -281,7 +287,7 @@ public final class OffscreenRenderer {
                     NativeImage image = matte(blackPassBackup, whitePass);
                     composites[view.ordinal()] = image;
                     Path file = out.resolve("mcoo_" + view.name().toLowerCase() + ".png");
-                    ImageIO.write(nativeToBuffered(image), "PNG", file.toFile());
+                    ImageIO.write(blueprintEffect(nativeToBuffered(image)), "PNG", file.toFile());
                     System.out.println("WROTE " + file);
                     viewComplete(client);
                 } catch (Exception error) {
@@ -304,12 +310,22 @@ public final class OffscreenRenderer {
             wait = 0;
             if (view == View.values().length) {
                 assembleComposites();
+                closeCapturedViews();
                 System.out.println("LITEMATIC_RENDER_DONE " + out);
                 client.stop();
                 job = null;
                 activeView = null;
                 worldStartRequested = false;
                 worldSettleTicks = 0;
+            }
+        }
+
+        private void closeCapturedViews() {
+            for (int i = 0; i < composites.length; i++) {
+                if (composites[i] != null) {
+                    composites[i].close();
+                    composites[i] = null;
+                }
             }
         }
 
@@ -433,7 +449,7 @@ public final class OffscreenRenderer {
             g.setColor(new java.awt.Color(107, 98, 86));
             g.setStroke(new java.awt.BasicStroke(2.0f));
             g.drawRect(x, y, size, size);
-            BufferedImage source = nativeToBuffered(composites[view.ordinal()]);
+            BufferedImage source = blueprintEffect(nativeToBuffered(composites[view.ordinal()]));
             if (rotateCounterClockwise) {
                 java.awt.Graphics2D rotated = (java.awt.Graphics2D)g.create();
                 // Java2D's Y axis points down, so a negative angle is visually CCW.
@@ -480,7 +496,7 @@ public final class OffscreenRenderer {
                     java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
             for (int i = 0; i < views.length; i++) {
                 NativeImage ni = composites[views[i].ordinal()];
-                BufferedImage src = nativeToBuffered(ni);
+                BufferedImage src = blueprintEffect(nativeToBuffered(ni));
                 g.drawImage(src, i * targetW, 0, targetW, targetH, null);
             }
             g.dispose();
@@ -502,6 +518,97 @@ public final class OffscreenRenderer {
                 }
             }
             return bi;
+        }
+
+        /**
+         * Pure-Java approximation of the owner-provided OpenCV blueprint_effect:
+         * grayscale, a small edge-preserving-filter substitute, Canny-like Sobel
+         * thresholds, one 2x2 dilation pass, then navy and cyan-white mapping.
+         * This method receives view pixels only; sheet furniture is drawn later.
+         */
+        private static BufferedImage blueprintEffect(BufferedImage source) {
+            int width = source.getWidth();
+            int height = source.getHeight();
+
+            // Flatten the alpha-matted color view onto white before edge finding,
+            // matching the colorful render's original white background.
+            BufferedImage opaque = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+            java.awt.Graphics2D opaqueGraphics = opaque.createGraphics();
+            opaqueGraphics.setColor(java.awt.Color.WHITE);
+            opaqueGraphics.fillRect(0, 0, width, height);
+            opaqueGraphics.drawImage(source, 0, 0, null);
+            opaqueGraphics.dispose();
+
+            BufferedImage gray = new BufferedImage(width, height, BufferedImage.TYPE_BYTE_GRAY);
+            new ColorConvertOp(ColorSpace.getInstance(ColorSpace.CS_GRAY), null)
+                    .filter(opaque, gray);
+
+            // A normalized 3x3 Gaussian is the requested low-memory bilateral
+            // approximation; EDGE_NO_OP avoids inventing a frame around the view.
+            float[] gaussian = {
+                    1f / 16f, 2f / 16f, 1f / 16f,
+                    2f / 16f, 4f / 16f, 2f / 16f,
+                    1f / 16f, 2f / 16f, 1f / 16f
+            };
+            BufferedImage filtered = new BufferedImage(width, height, BufferedImage.TYPE_BYTE_GRAY);
+            new ConvolveOp(new Kernel(3, 3, gaussian), ConvolveOp.EDGE_NO_OP, null)
+                    .filter(gray, filtered);
+
+            byte[] edgeClass = new byte[width * height];
+            int[] sobelX = {-1, 0, 1, -2, 0, 2, -1, 0, 1};
+            int[] sobelY = {-1, -2, -1, 0, 0, 0, 1, 2, 1};
+            for (int y = 1; y < height - 1; y++) {
+                for (int x = 1; x < width - 1; x++) {
+                    int gx = 0;
+                    int gy = 0;
+                    int kernelIndex = 0;
+                    for (int ky = -1; ky <= 1; ky++) {
+                        for (int kx = -1; kx <= 1; kx++) {
+                            int sample = filtered.getRaster().getSample(x + kx, y + ky, 0);
+                            gx += sample * sobelX[kernelIndex];
+                            gy += sample * sobelY[kernelIndex++];
+                        }
+                    }
+                    int magnitude = Math.min(255, (Math.abs(gx) + Math.abs(gy)) / 4);
+                    edgeClass[y * width + x] = (byte)(magnitude >= 110 ? 2 : magnitude >= 40 ? 1 : 0);
+                }
+            }
+
+            // Lightweight hysteresis: retain a weak pixel when it touches a
+            // strong one, corresponding to Canny's low/high thresholds.
+            BufferedImage edges = new BufferedImage(width, height, BufferedImage.TYPE_BYTE_BINARY);
+            for (int y = 1; y < height - 1; y++) {
+                for (int x = 1; x < width - 1; x++) {
+                    int index = y * width + x;
+                    boolean keep = edgeClass[index] == 2;
+                    if (!keep && edgeClass[index] == 1) {
+                        for (int ky = -1; ky <= 1 && !keep; ky++) {
+                            for (int kx = -1; kx <= 1; kx++) {
+                                if (edgeClass[(y + ky) * width + x + kx] == 2) {
+                                    keep = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (keep) edges.getRaster().setSample(x, y, 0, 1);
+                }
+            }
+
+            BufferedImage result = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+            java.awt.Graphics2D graphics = result.createGraphics();
+            graphics.setColor(BLUEPRINT_BACKGROUND);
+            graphics.fillRect(0, 0, width, height);
+            graphics.setColor(BLUEPRINT_LINE);
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    if (edges.getRaster().getSample(x, y, 0) != 0) {
+                        graphics.fillRect(x, y, 2, 2);
+                    }
+                }
+            }
+            graphics.dispose();
+            return result;
         }
 
     }
