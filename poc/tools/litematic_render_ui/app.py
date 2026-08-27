@@ -16,7 +16,7 @@ from flask import Blueprint, abort, jsonify, redirect, render_template, request,
 from werkzeug.utils import secure_filename
 
 POC_ROOT = Path(__file__).resolve().parents[2]
-OUTPUT_ROOT = Path(os.environ.get("LITEMATIC_RENDER_OUTPUT", "/tmp/poc_v96"))
+OUTPUT_ROOT = Path(os.environ.get("LITEMATIC_RENDER_OUTPUT", "/tmp/poc_v101"))
 TASKS_FILE = OUTPUT_ROOT / "tasks.json"
 JAVA_HOME = Path(os.environ.get("LITEMATIC_RENDER_JAVA_HOME", "/opt/java/jdk-25.0.1"))
 _lock = threading.RLock()
@@ -87,6 +87,7 @@ def _run(task_id):
         outputs = {
             "paper": "mcoo_overview_paper.png" if (output / "mcoo_overview_paper.png").is_file() else None,
             "blueprint": "mcoo_overview.png" if (output / "mcoo_overview.png").is_file() else None,
+            "thumbnail": "mcoo_axon_x_pos_z_pos.png" if (output / "mcoo_axon_x_pos_z_pos.png").is_file() else None,
             "workbook": workbook.name if workbook else None,
             "log": log_file.name,
         }
@@ -102,6 +103,12 @@ def _run(task_id):
 @bp.get("/tools/litematic_render/")
 def task_list():
     tasks = sorted(_read_tasks(), key=lambda item: item.get("created_at", 0), reverse=True)
+    # V101 list cards use the +X +Z axonometric render as their video-style cover.
+    # Backfill it in memory for tasks created before the thumbnail output key existed.
+    for task in tasks:
+        thumbnail = Path(task.get("output_dir", "")) / "mcoo_axon_x_pos_z_pos.png"
+        if thumbnail.is_file():
+            task.setdefault("outputs", {})["thumbnail"] = thumbnail.name
     return render_template("litematic_tasks.html", tasks=tasks)
 
 
@@ -162,15 +169,17 @@ def download_source(task_id):
 @bp.get("/tools/litematic_render/<task_id>/download/<kind>")
 def download_output(task_id, kind):
     task = _task(task_id)
-    if not task or kind not in {"paper", "blueprint", "workbook", "log"}:
+    if not task or kind not in {"paper", "blueprint", "thumbnail", "workbook", "log"}:
         abort(404)
     filename = task.get("outputs", {}).get(kind)
+    if kind == "thumbnail" and not filename:
+        filename = "mcoo_axon_x_pos_z_pos.png"
     if not filename:
         abort(404)
     path = (Path(task["output_dir"]) / filename).resolve()
     if path.parent != Path(task["output_dir"]).resolve() or not path.is_file():
         abort(404)
-    inline = kind in {"paper", "blueprint"}
+    inline = kind in {"paper", "blueprint", "thumbnail"}
     return send_file(path, as_attachment=not inline, download_name=path.name)
 
 
