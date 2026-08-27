@@ -570,6 +570,9 @@ public final class OffscreenRenderer {
                         materialBlackPass=null;
                         client.setScreenAndShow(null);
                         assembleComposites();
+                        Path workbook = MaterialWorkbookWriter.write(out, input.getFileName().toString(),
+                                materials.stream().map(entry -> new MaterialWorkbookWriter.Row(entry.name, entry.count)).toList());
+                        System.out.println("WROTE MATERIAL WORKBOOK " + workbook.toAbsolutePath());
                         finish(client);
                     }
                 } catch (Exception error) {
