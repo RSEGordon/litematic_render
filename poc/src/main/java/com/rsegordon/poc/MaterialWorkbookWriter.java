@@ -141,7 +141,7 @@ final class MaterialWorkbookWriter {
                 + ">" + content + "</c>";
     }
 
-    private static String safeName(String value) {
+    static String safeName(String value) {
         String cleaned = value.replaceAll("(?i)\\.litematic$", "").replaceAll("[\\\\/:*?\"<>|]", "_").trim();
         return cleaned.isEmpty() ? "litematic" : cleaned;
     }

@@ -189,9 +189,11 @@ def _run(task_id):
             result = subprocess.run(command, cwd=POC_ROOT, env=env, stdout=log,
                                     stderr=subprocess.STDOUT, timeout=1800, check=False)
         workbook = next(output.glob("*_备货清单.xlsx"), None)
+        output_prefix = re.sub(r"(?i)\.litematic$", "", task["filename"])
+        output_prefix = re.sub(r'[\\/:*?"<>|]', "_", output_prefix).strip() or "litematic"
         outputs = {
-            "paper": "mcoo_overview_paper.png" if (output / "mcoo_overview_paper.png").is_file() else None,
-            "blueprint": "mcoo_overview.png" if (output / "mcoo_overview.png").is_file() else None,
+            "paper": f"{output_prefix}_overview_paper.png" if (output / f"{output_prefix}_overview_paper.png").is_file() else None,
+            "blueprint": f"{output_prefix}_overview.png" if (output / f"{output_prefix}_overview.png").is_file() else None,
             "thumbnail": "mcoo_axon_x_pos_z_pos_paper.png" if (output / "mcoo_axon_x_pos_z_pos_paper.png").is_file() else None,
             "workbook": workbook.name if workbook else None,
             "log": log_file.name,

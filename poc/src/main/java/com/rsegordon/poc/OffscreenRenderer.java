@@ -920,7 +920,7 @@ public final class OffscreenRenderer {
                         Path workbook = MaterialWorkbookWriter.write(out, input.getFileName().toString(),
                                 materials.stream().map(entry -> new MaterialWorkbookWriter.Row(entry.name, entry.count)).toList());
                         System.out.println("WROTE MATERIAL WORKBOOK " + workbook.toAbsolutePath());
-                        Path archive = OutputArchiveWriter.write(out, workbook);
+                        Path archive = OutputArchiveWriter.write(out, outputBaseName(), workbook);
                         System.out.println("WROTE OUTPUT ARCHIVE " + archive.toAbsolutePath());
                         finish(client);
                     }
@@ -1083,8 +1083,8 @@ public final class OffscreenRenderer {
         private void addCompositeOutputPaths(List<String> paths, String suffix) {
             paths.add(out.resolve("mcoo_3view" + suffix + ".png").toAbsolutePath().toString());
             paths.add(out.resolve("mcoo_4angle" + suffix + ".png").toAbsolutePath().toString());
-            paths.add(out.resolve("mcoo_overview" + suffix + ".png").toAbsolutePath().toString());
-            paths.add(out.resolve("mcoo_overview" + suffix + "_no_materials.png").toAbsolutePath().toString());
+            paths.add(out.resolve(outputBaseName() + "_overview" + suffix + ".png").toAbsolutePath().toString());
+            paths.add(out.resolve(outputBaseName() + "_overview" + suffix + "_no_materials.png").toAbsolutePath().toString());
         }
 
         private void assembleStyle(Style outputStyle, String suffix) throws Exception {
@@ -1093,14 +1093,14 @@ public final class OffscreenRenderer {
                             View.AXON_X_NEG_Z_POS, View.AXON_X_NEG_Z_NEG},
                     "mcoo_4angle" + suffix + ".png", outputStyle);
             compositeOverview(suffix);
-            compositeEngineeringSheet("mcoo_overview" + suffix + "_no_materials.png", outputStyle, false);
+            compositeEngineeringSheet(outputBaseName() + "_overview" + suffix + "_no_materials.png", outputStyle, false);
         }
 
         private void compositeOverview(String suffix) throws Exception {
             // The overview is intentionally the same complete engineering sheet
             // as the legacy 3view name. Reuse the already encoded result instead
             // of running ten native pencil passes a second time.
-            Path destination = out.resolve("mcoo_overview" + suffix + ".png");
+            Path destination = out.resolve(outputBaseName() + "_overview" + suffix + ".png");
             Files.copy(out.resolve("mcoo_3view" + suffix + ".png"), destination,
                     java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             System.out.println("WROTE COMPOSITE " + destination + " (reused engineering sheet)");
@@ -1346,6 +1346,10 @@ public final class OffscreenRenderer {
             String name=title == null || title.isBlank() ? input.getFileName().toString() : title;
             return name.toLowerCase(Locale.ROOT).endsWith(".litematic")
                     ? name.substring(0,name.length()-".litematic".length()) : name;
+        }
+
+        private String outputBaseName() {
+            return MaterialWorkbookWriter.safeName(sheetTitle());
         }
 
         private void drawMaterials(java.awt.Graphics2D g, int x, int y, int width, int height,

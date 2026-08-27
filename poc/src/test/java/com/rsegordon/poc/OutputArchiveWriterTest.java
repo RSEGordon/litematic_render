@@ -15,12 +15,12 @@ class OutputArchiveWriterTest {
     @Test
     void packagesExactlyFourOverviewsAndWorkbook() throws Exception {
         List<String> names = List.of(
-                "mcoo_overview.png", "mcoo_overview_paper.png",
-                "mcoo_overview_no_materials.png", "mcoo_overview_paper_no_materials.png",
+                "测试_overview.png", "测试_overview_paper.png",
+                "测试_overview_no_materials.png", "测试_overview_paper_no_materials.png",
                 "测试_备货清单.xlsx");
         for (String name : names) Files.writeString(directory.resolve(name), name);
 
-        Path archive = OutputArchiveWriter.write(directory, directory.resolve(names.get(4)));
+        Path archive = OutputArchiveWriter.write(directory, "测试.litematic", directory.resolve(names.get(4)));
 
         try (ZipFile zip = new ZipFile(archive.toFile())) {
             assertEquals(names, zip.stream().map(entry -> entry.getName()).toList());
