@@ -63,12 +63,17 @@ final class MaterialWorkbookWriter {
         String centered = "<xf fontId=\"10\" fillId=\"4\" borderId=\"0\" xfId=\"0\">"
                 + "<alignment horizontal=\"center\" vertical=\"center\" textRotation=\"0\" indent=\"0\" justifyLastLine=\"0\" shrinkToFit=\"0\"/>"
                 + "</xf>";
-        if (!styles.contains(left) || !styles.contains(centered)) {
-            throw new IOException("Owner workbook is missing total progress bar styles");
-        }
         String leftAligned = left.replace("<alignment ", "<alignment horizontal=\"left\" ");
         String centeredLeftAligned = centered.replace("horizontal=\"center\"", "horizontal=\"left\"");
-        return styles.replace(left, leftAligned).replace(centered, centeredLeftAligned);
+        return replaceSingleStyle(replaceSingleStyle(styles, left, leftAligned), centered, centeredLeftAligned);
+    }
+
+    private static String replaceSingleStyle(String styles, String current, String replacement) throws IOException {
+        int first = styles.indexOf(current);
+        if (first < 0 || styles.indexOf(current, first + current.length()) >= 0) {
+            throw new IOException("Owner workbook must contain exactly one matching total progress bar style");
+        }
+        return styles.substring(0, first) + replacement + styles.substring(first + current.length());
     }
 
     private static String fillSheet(String template, List<Row> materials) throws IOException {
