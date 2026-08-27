@@ -39,8 +39,7 @@ import java.awt.image.Kernel;
 
 /** Minimal proof: populate a ClientWorld, let the normal WorldRenderer draw it, copy its framebuffer. */
 public final class OffscreenRenderer {
-    private static final java.awt.Color BLUEPRINT_BACKGROUND = new java.awt.Color(18, 50, 95);
-    private static final java.awt.Color BLUEPRINT_LINE = new java.awt.Color(225, 245, 245);
+    private static final java.awt.Color BLUEPRINT_LINE = java.awt.Color.WHITE;
     /** 32 chunks covers a 100-block structure plus the most distant axonometric camera. */
     private static final int RENDER_DISTANCE_CHUNKS = 32;
     private static Job job;
@@ -287,7 +286,9 @@ public final class OffscreenRenderer {
                     NativeImage image = matte(blackPassBackup, whitePass);
                     composites[view.ordinal()] = image;
                     Path file = out.resolve("mcoo_" + view.name().toLowerCase() + ".png");
-                    ImageIO.write(blueprintEffect(nativeToBuffered(image)), "PNG", file.toFile());
+                    BufferedImage blueprint = blueprintEffect(nativeToBuffered(image));
+                    blueprintViews[view.ordinal()] = blueprint;
+                    ImageIO.write(blueprint, "PNG", file.toFile());
                     System.out.println("WROTE " + file);
                     viewComplete(client);
                 } catch (Exception error) {
@@ -326,8 +327,14 @@ public final class OffscreenRenderer {
                     composites[i].close();
                     composites[i] = null;
                 }
+                if (blueprintViews[i] != null) {
+                    blueprintViews[i].flush();
+                    blueprintViews[i] = null;
+                }
             }
         }
+
+        private final BufferedImage[] blueprintViews = new BufferedImage[View.values().length];
 
         private NativeImage blackPassBackup;
 
@@ -391,8 +398,10 @@ public final class OffscreenRenderer {
             int totalH = margin * 2 + titleH + cell * 3 + gap * 2 + footerH;
             BufferedImage canvas = new BufferedImage(totalW, totalH, BufferedImage.TYPE_INT_ARGB);
             java.awt.Graphics2D g = canvas.createGraphics();
-            g.setColor(java.awt.Color.WHITE);
+            java.awt.Color sheetBackground = sheetBackground();
+            g.setColor(sheetBackground);
             g.fillRect(0, 0, totalW, totalH);
+            drawEngineeringGrid(g, totalW, totalH);
             g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
                     java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
             g.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING,
@@ -400,16 +409,16 @@ public final class OffscreenRenderer {
 
             int x0 = margin, x1 = x0 + cell + gap, x2 = x1 + cell + gap, x3 = x2 + cell + gap;
             int y0 = margin + titleH, y1 = y0 + cell + gap, y2 = y1 + cell + gap;
-            drawViewCell(g, View.AXON_X_POS_Z_POS, x0, y0, cell, "AXON +X +Z", false);
-            drawViewCell(g, View.BOTTOM_X_UP, x1, y0, cell, "BOTTOM (+X UP)", false);
-            drawViewCell(g, View.AXON_X_NEG_Z_POS, x3, y0, cell, "AXON -X +Z", false);
-            drawViewCell(g, View.LEFT_Z_NEG, x0, y1, cell, "RIGHT (-Z LOOK)", false);
-            drawViewCell(g, View.FRONT_X_POS, x1, y1, cell, "FRONT (+X)", false);
-            drawViewCell(g, View.RIGHT_Z_POS, x2, y1, cell, "LEFT (V72)", false);
-            drawViewCell(g, View.BACK_X_NEG, x3, y1, cell, "BACK (-X)", false);
-            drawViewCell(g, View.AXON_X_POS_Z_NEG, x0, y2, cell, "AXON +X -Z", false);
-            drawViewCell(g, View.TOP_X_UP, x1, y2, cell, "TOP (+X UP)", false);
-            drawViewCell(g, View.AXON_X_NEG_Z_NEG, x3, y2, cell, "AXON -X -Z", false);
+            drawViewCell(g, View.AXON_X_POS_Z_POS, x0, y0, cell, "AXON +X +Z", false, sheetBackground);
+            drawViewCell(g, View.BOTTOM_X_UP, x1, y0, cell, "BOTTOM (+X UP)", false, sheetBackground);
+            drawViewCell(g, View.AXON_X_NEG_Z_POS, x3, y0, cell, "AXON -X +Z", false, sheetBackground);
+            drawViewCell(g, View.LEFT_Z_NEG, x0, y1, cell, "RIGHT (-Z LOOK)", false, sheetBackground);
+            drawViewCell(g, View.FRONT_X_POS, x1, y1, cell, "FRONT (+X)", false, sheetBackground);
+            drawViewCell(g, View.RIGHT_Z_POS, x2, y1, cell, "LEFT (V72)", false, sheetBackground);
+            drawViewCell(g, View.BACK_X_NEG, x3, y1, cell, "BACK (-X)", false, sheetBackground);
+            drawViewCell(g, View.AXON_X_POS_Z_NEG, x0, y2, cell, "AXON +X -Z", false, sheetBackground);
+            drawViewCell(g, View.TOP_X_UP, x1, y2, cell, "TOP (+X UP)", false, sheetBackground);
+            drawViewCell(g, View.AXON_X_NEG_Z_NEG, x3, y2, cell, "AXON -X -Z", false, sheetBackground);
 
             g.setColor(java.awt.Color.BLACK);
             g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.BOLD, (int)Math.round(34 * scale)));
@@ -444,12 +453,31 @@ public final class OffscreenRenderer {
             System.out.println("WROTE COMPOSITE " + file + " (" + totalW + "x" + totalH + ")");
         }
 
+        private static void drawEngineeringGrid(java.awt.Graphics2D g, int width, int height) {
+            int size = positiveIntProperty("litematic.sheet.grid.size", 64);
+            g.setColor(rgbProperty("litematic.sheet.grid.color", new java.awt.Color(60, 60, 60)));
+            g.setStroke(new java.awt.BasicStroke(1f));
+            for (int x = size; x < width; x += size) g.drawLine(x, 0, x, height);
+            for (int y = size; y < height; y += size) g.drawLine(0, y, width, y);
+        }
+
+        private static java.awt.Color sheetBackground() {
+            int b = colorProperty("litematic.sheet.bg.b", 95);
+            int g = colorProperty("litematic.sheet.bg.g", 50);
+            int r = colorProperty("litematic.sheet.bg.r", 18);
+            return new java.awt.Color(r, g, b);
+        }
+
         private void drawViewCell(java.awt.Graphics2D g, View view, int x, int y,
-                                  int size, String label, boolean rotateCounterClockwise) {
+                                  int size, String label, boolean rotateCounterClockwise,
+                                  java.awt.Color background) {
+            // Cover the sheet grid before drawing the transparent edge layer.
+            g.setColor(background);
+            g.fillRect(x, y, size, size);
             g.setColor(new java.awt.Color(107, 98, 86));
             g.setStroke(new java.awt.BasicStroke(2.0f));
             g.drawRect(x, y, size, size);
-            BufferedImage source = blueprintEffect(nativeToBuffered(composites[view.ordinal()]));
+            BufferedImage source = blueprintViews[view.ordinal()];
             if (rotateCounterClockwise) {
                 java.awt.Graphics2D rotated = (java.awt.Graphics2D)g.create();
                 // Java2D's Y axis points down, so a negative angle is visually CCW.
@@ -490,13 +518,12 @@ public final class OffscreenRenderer {
             java.awt.image.BufferedImage canvas = new java.awt.image.BufferedImage(
                     totalW, targetH, java.awt.image.BufferedImage.TYPE_INT_ARGB);
             java.awt.Graphics2D g = canvas.createGraphics();
-            g.setColor(java.awt.Color.WHITE);
+            g.setColor(sheetBackground());
             g.fillRect(0, 0, totalW, targetH);
             g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
                     java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
             for (int i = 0; i < views.length; i++) {
-                NativeImage ni = composites[views[i].ordinal()];
-                BufferedImage src = blueprintEffect(nativeToBuffered(ni));
+                BufferedImage src = blueprintViews[views[i].ordinal()];
                 g.drawImage(src, i * targetW, 0, targetW, targetH, null);
             }
             g.dispose();
@@ -523,7 +550,7 @@ public final class OffscreenRenderer {
         /**
          * Pure-Java approximation of the owner-provided OpenCV blueprint_effect:
          * grayscale, a small edge-preserving-filter substitute, Canny-like Sobel
-         * thresholds, one 2x2 dilation pass, then navy and cyan-white mapping.
+         * thresholds and dilation, then transparent-background white edges.
          * This method receives view pixels only; sheet furniture is drawn later.
          */
         private static BufferedImage blueprintEffect(BufferedImage source) {
@@ -543,20 +570,30 @@ public final class OffscreenRenderer {
             new ColorConvertOp(ColorSpace.getInstance(ColorSpace.CS_GRAY), null)
                     .filter(opaque, gray);
 
-            // A normalized 3x3 Gaussian is the requested low-memory bilateral
-            // approximation; EDGE_NO_OP avoids inventing a frame around the view.
-            float[] gaussian = {
-                    1f / 16f, 2f / 16f, 1f / 16f,
-                    2f / 16f, 4f / 16f, 2f / 16f,
-                    1f / 16f, 2f / 16f, 1f / 16f
-            };
+            int bilateralD = oddPositiveIntProperty("litematic.blueprint.bilateral.d", 7);
+            double sigmaColor = positiveDoubleProperty("litematic.blueprint.bilateral.sigmaColor", 35.0);
+            double sigmaSpace = positiveDoubleProperty("litematic.blueprint.bilateral.sigmaSpace", 35.0);
+            // Low-memory bilateral approximation: spatial Gaussian strength is
+            // controlled by sigmaSpace; sigmaColor controls how much smoothing
+            // is mixed back into the original luminance.
+            float[] gaussian = gaussianKernel(bilateralD, sigmaSpace);
             BufferedImage filtered = new BufferedImage(width, height, BufferedImage.TYPE_BYTE_GRAY);
-            new ConvolveOp(new Kernel(3, 3, gaussian), ConvolveOp.EDGE_NO_OP, null)
+            new ConvolveOp(new Kernel(bilateralD, bilateralD, gaussian), ConvolveOp.EDGE_NO_OP, null)
                     .filter(gray, filtered);
+            double smoothMix = sigmaColor / (sigmaColor + 35.0);
+            for (int y = 0; y < height; y++) for (int x = 0; x < width; x++) {
+                int original = gray.getRaster().getSample(x, y, 0);
+                int blurred = filtered.getRaster().getSample(x, y, 0);
+                filtered.getRaster().setSample(x, y, 0,
+                        (int)Math.round(original * (1.0 - smoothMix) + blurred * smoothMix));
+            }
 
             byte[] edgeClass = new byte[width * height];
             int[] sobelX = {-1, 0, 1, -2, 0, 2, -1, 0, 1};
             int[] sobelY = {-1, -2, -1, 0, 0, 0, 1, 2, 1};
+            int cannyLow = positiveIntProperty("litematic.blueprint.canny.low", 40);
+            int cannyHigh = Math.max(cannyLow,
+                    positiveIntProperty("litematic.blueprint.canny.high", 110));
             for (int y = 1; y < height - 1; y++) {
                 for (int x = 1; x < width - 1; x++) {
                     int gx = 0;
@@ -570,7 +607,7 @@ public final class OffscreenRenderer {
                         }
                     }
                     int magnitude = Math.min(255, (Math.abs(gx) + Math.abs(gy)) / 4);
-                    edgeClass[y * width + x] = (byte)(magnitude >= 110 ? 2 : magnitude >= 40 ? 1 : 0);
+                    edgeClass[y * width + x] = (byte)(magnitude >= cannyHigh ? 2 : magnitude >= cannyLow ? 1 : 0);
                 }
             }
 
@@ -595,20 +632,73 @@ public final class OffscreenRenderer {
                 }
             }
 
-            BufferedImage result = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+            int dilateKernel = positiveIntProperty("litematic.blueprint.dilate.kernel", 2);
+            int dilateIterations = nonNegativeIntProperty("litematic.blueprint.dilate.iterations", 1);
+            BufferedImage result = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
             java.awt.Graphics2D graphics = result.createGraphics();
-            graphics.setColor(BLUEPRINT_BACKGROUND);
-            graphics.fillRect(0, 0, width, height);
             graphics.setColor(BLUEPRINT_LINE);
             for (int y = 0; y < height; y++) {
                 for (int x = 0; x < width; x++) {
                     if (edges.getRaster().getSample(x, y, 0) != 0) {
-                        graphics.fillRect(x, y, 2, 2);
+                        int grown = 1 + dilateIterations * (dilateKernel - 1);
+                        graphics.fillRect(x, y, grown, grown);
                     }
                 }
             }
             graphics.dispose();
             return result;
+        }
+
+        private static float[] gaussianKernel(int size, double sigma) {
+            float[] values = new float[size * size];
+            int radius = size / 2;
+            double effectiveSigma = Math.max(0.1, sigma * size / 35.0);
+            double sum = 0;
+            for (int y = -radius; y <= radius; y++) for (int x = -radius; x <= radius; x++) {
+                double value = Math.exp(-(x * x + y * y) / (2.0 * effectiveSigma * effectiveSigma));
+                values[(y + radius) * size + x + radius] = (float)value;
+                sum += value;
+            }
+            for (int i = 0; i < values.length; i++) values[i] /= (float)sum;
+            return values;
+        }
+
+        private static int positiveIntProperty(String name, int fallback) {
+            return Math.max(1, Integer.getInteger(name, fallback));
+        }
+
+        private static int nonNegativeIntProperty(String name, int fallback) {
+            return Math.max(0, Integer.getInteger(name, fallback));
+        }
+
+        private static int oddPositiveIntProperty(String name, int fallback) {
+            int value = positiveIntProperty(name, fallback);
+            return (value & 1) == 0 ? value + 1 : value;
+        }
+
+        private static double positiveDoubleProperty(String name, double fallback) {
+            try {
+                return Math.max(0.1, Double.parseDouble(System.getProperty(name, Double.toString(fallback))));
+            } catch (NumberFormatException ignored) {
+                return fallback;
+            }
+        }
+
+        private static int colorProperty(String name, int fallback) {
+            return Math.max(0, Math.min(255, Integer.getInteger(name, fallback)));
+        }
+
+        private static java.awt.Color rgbProperty(String name, java.awt.Color fallback) {
+            String[] values = System.getProperty(name, "").split(",");
+            if (values.length != 3) return fallback;
+            try {
+                return new java.awt.Color(
+                        Math.max(0, Math.min(255, Integer.parseInt(values[0].trim()))),
+                        Math.max(0, Math.min(255, Integer.parseInt(values[1].trim()))),
+                        Math.max(0, Math.min(255, Integer.parseInt(values[2].trim()))));
+            } catch (IllegalArgumentException ignored) {
+                return fallback;
+            }
         }
 
     }
