@@ -730,6 +730,23 @@ public final class OffscreenRenderer {
             Path file = out.resolve(outName);
             ImageIO.write(canvas, "PNG", file.toFile());
             System.out.println("WROTE COMPOSITE " + file + " (" + totalW + "x" + totalH + ")");
+            writeMaterialsDetail(canvas,margin,materialsY,totalW-margin*2,materialsH,outputStyle);
+        }
+
+        /** Writes a 2x nearest-neighbour proof crop for reviewing the material UI. */
+        private void writeMaterialsDetail(BufferedImage sheet, int x, int y, int width, int height,
+                                          Style outputStyle) throws Exception {
+            BufferedImage detail=new BufferedImage(width*2,height*2,BufferedImage.TYPE_INT_ARGB);
+            java.awt.Graphics2D detailGraphics=detail.createGraphics();
+            detailGraphics.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+                    java.awt.RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+            detailGraphics.drawImage(sheet,0,0,width*2,height*2,x,y,x+width,y+height,null);
+            detailGraphics.dispose();
+            String styleName=outputStyle == Style.PAPER ? "paper" : "blueprint";
+            Path file=out.resolve("materials_detail_"+styleName+".png");
+            ImageIO.write(detail,"PNG",file.toFile());
+            detail.flush();
+            System.out.println("WROTE MATERIAL DETAIL " + file + " (" + width*2 + "x" + height*2 + ")");
         }
 
         private static void drawEngineeringGrid(java.awt.Graphics2D g, int width, int height, Style style) {
@@ -784,8 +801,10 @@ public final class OffscreenRenderer {
         private void drawMaterials(java.awt.Graphics2D g, int x, int y, int width, int height,
                                    double scale, Style style, java.awt.Color textColor) {
             int heading=(int)Math.round(22*scale), rowH=(int)Math.round(42*scale);
-            int panelPad=(int)Math.round(18*scale), iconSize=(int)Math.round(28*scale);
-            int columnGap=(int)Math.round(32*scale);
+            int panelPad=(int)Math.round(18*scale), iconSize=(int)Math.round(33*scale);
+            int iconPlatePad=Math.max(2,(int)Math.round(2*scale));
+            int iconPlateSize=iconSize+iconPlatePad*2;
+            int columnGap=(int)Math.round(54*scale);
             int columnW=(width-panelPad*2-columnGap*3)/4;
             g.setColor(style == Style.BLUEPRINT ? new java.awt.Color(10,35,75,190)
                     : new java.awt.Color(238,232,216,235));
@@ -804,12 +823,28 @@ public final class OffscreenRenderer {
                 int cellX=x+panelPad+column*(columnW+columnGap);
                 int cellY=y+panelPad+(int)Math.round(32*scale)+row*rowH;
                 MaterialEntry entry=materials.get(i);
-                if (entry.icon != null) g.drawImage(entry.icon,cellX,cellY,iconSize,iconSize,null);
-                int textX=cellX+iconSize+(int)Math.round(10*scale);
-                int baseline=cellY+(int)Math.round(21*scale);
+                g.setColor(style == Style.BLUEPRINT ? new java.awt.Color(218,235,250,238)
+                        : new java.awt.Color(248,245,235,242));
+                g.fillRoundRect(cellX,cellY,iconPlateSize,iconPlateSize,
+                        (int)Math.round(5*scale),(int)Math.round(5*scale));
+                g.setColor(style == Style.BLUEPRINT ? new java.awt.Color(255,255,255,225)
+                        : new java.awt.Color(174,167,153,220));
+                g.setStroke(new java.awt.BasicStroke((float)Math.max(1.0,scale)));
+                g.drawRoundRect(cellX,cellY,iconPlateSize-1,iconPlateSize-1,
+                        (int)Math.round(5*scale),(int)Math.round(5*scale));
+                if (entry.icon != null) {
+                    Object oldInterpolation=g.getRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION);
+                    g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+                            java.awt.RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+                    g.drawImage(entry.icon,cellX+iconPlatePad,cellY+iconPlatePad,iconSize,iconSize,null);
+                    if (oldInterpolation != null)
+                        g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,oldInterpolation);
+                }
+                int textX=cellX+iconPlateSize+(int)Math.round(7*scale);
+                int baseline=cellY+(int)Math.round(24*scale);
                 String quantity=Long.toString(entry.count);
                 java.awt.FontMetrics fm=g.getFontMetrics();
-                int quantityGap=(int)Math.round(8*scale);
+                int quantityGap=(int)Math.round(5*scale);
                 int available=Math.max(10,columnW-(textX-cellX)-fm.stringWidth(quantity)-quantityGap);
                 String name=fitText(entry.name,fm,available);
                 int quantityX=textX+fm.stringWidth(name)+quantityGap;
