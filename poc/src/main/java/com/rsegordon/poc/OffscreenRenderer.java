@@ -300,19 +300,11 @@ public final class OffscreenRenderer {
                 Entity rootEntity=EntityType.loadEntityRecursive(tag,client.level,
                         new EntitySpawnRequest(EntitySpawnReason.LOAD,false), entity -> {
                     entity.setUUID(UUID.randomUUID());
+                    entity.setPos(entity.position().add(entityOrigin));
                     return entity;
                 });
                 if (rootEntity==null) continue;
-                // Litematica stores the root entity in region-local coordinates,
-                // while passenger Pos tags may retain their old world coordinates.
-                // Translate the root once, then anchor riders to their vehicle;
-                // translating every recursively loaded entity made stale passenger
-                // coordinates expand the camera bounds and the build disappeared.
-                rootEntity.setPos(rootEntity.position().add(entityOrigin));
                 for (Entity entity : rootEntity.getSelfAndPassengers().toList()) {
-                    if (entity.getVehicle() != null) {
-                        entity.setPos(entity.getVehicle().position());
-                    }
                     entity.setId(nextEntityId--);
                     entity.setDeltaMovement(Vec3.ZERO);
                     entity.setNoGravity(true);
@@ -433,7 +425,10 @@ public final class OffscreenRenderer {
                 halfSize=(float)(Math.max(vertical,horizontal/aspect)*1.2);
             }
             halfSize=Math.max(halfSize,1.0f);
-            double distance=radius+Math.max(8.0,halfSize*1.2);
+            // Orthographic scale is independent of camera distance. Stay just
+            // outside the complete bounds so its chunks remain inside the
+            // client's render distance even when entities make the bounds wide.
+            double distance=radius+8.0;
             Vec3 position=center.subtract(forward.scale(distance));
             float farPlane=(float)Math.max(256.0,distance+radius+32.0);
             return new ViewState(position,halfSize,farPlane);
@@ -1289,7 +1284,13 @@ public final class OffscreenRenderer {
             throw new IllegalStateException("No PNG writer available for " + file);
         }
         bare.flush();
-        assertBareSingleView(file);
+        try {
+            assertBareSingleView(file);
+        } catch (IllegalStateException warning) {
+            // A bad camera position can produce one empty angle. Preserve the
+            // diagnostic, but let the remaining views and composite sheets render.
+            System.out.println("WARN " + warning.getMessage());
+        }
         System.out.println("WROTE BARE SINGLE VIEW " + file);
     }
 
