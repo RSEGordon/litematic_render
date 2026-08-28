@@ -27,6 +27,7 @@ TASKS_FILE = LITEMATIC_DIR / "tasks.json"
 JAVA_HOME = Path(os.environ.get("LITEMATIC_RENDER_JAVA_HOME", "/opt/java/jdk-25.0.1"))
 _lock = threading.RLock()
 _render_lock = threading.Lock()
+_task_processes = {}  # V129: task_id -> (python_thread, java_popen) for kill-on-delete
 bp = Blueprint("litematic_render", __name__, template_folder="templates")
 MAX_RENDER_DIMENSION = 80
 UPDATE_RETRIES = 3
@@ -398,9 +399,19 @@ def _run(task_id):
         with _render_lock, log_file.open("w", encoding="utf-8") as log:
             _update(task_id, status="rendering", started_at=int(time.time()))
             _log_status(logging.INFO, "[%s] rendering started", task_id)
-            result = subprocess.run(command, cwd=POC_ROOT, env=env, stdout=log,
-                                    stderr=subprocess.STDOUT, timeout=1800, check=False)
-        _log_status(logging.INFO, "[%s] subprocess returned %s", task_id, result.returncode)
+            # V129: 用 Popen 而非 run, 以便 delete_task 能 kill
+            process = subprocess.Popen(command, cwd=POC_ROOT, env=env, stdout=log,
+                                       stderr=subprocess.STDOUT, start_new_session=True)
+            _task_processes[task_id] = process
+            try:
+                result = process.wait(timeout=1800)
+            except subprocess.TimeoutExpired:
+                _log_status(logging.ERROR, "[%s] timeout, killing", task_id)
+                process.kill()
+                result = -9
+            finally:
+                _task_processes.pop(task_id, None)
+        _log_status(logging.INFO, "[%s] subprocess returned %s", task_id, result)
         workbook = next(output.glob("*_备货清单.xlsx"), None)
         output_prefix = re.sub(r"(?i)\.litematic$", "", task["filename"])
         output_prefix = re.sub(r'[\\/:*?"<>|]', "_", output_prefix).strip() or "litematic"
@@ -413,10 +424,11 @@ def _run(task_id):
             "workbook": workbook.name if workbook else None,
             "log": log_file.name,
         }
-        complete = result.returncode == 0 and all(outputs[k] for k in ("paper", "blueprint", "workbook"))
+        returncode = result if isinstance(result, int) else getattr(result, "returncode", -1)
+        complete = returncode == 0 and all(outputs[k] for k in ("paper", "blueprint", "workbook"))
         final_changes = {
             "status": "complete" if complete else "failed", "outputs": outputs,
-            "error": None if complete else f"渲染退出码 {result.returncode}，请查看日志",
+            "error": None if complete else f"渲染退出码 {returncode}，请查看日志",
             "finished_at": int(time.time()),
         }
         try:
@@ -512,7 +524,8 @@ def upload():
         tasks.append(task)
         _write_tasks(tasks)
     threading.Thread(target=_run, args=(task_id,), daemon=True, name=f"litematic-{task_id}").start()
-    return redirect(url_for("litematic_render.task_detail", task_id=task_id), code=303)
+    # V129: 不跳转详情页, 保留在任务列表页 — 返回 JSON
+    return jsonify({"ok": True, "task_id": task_id, "redirect": url_for("litematic_render.task_detail", task_id=task_id)})
 
 
 @bp.get("/tools/litematic_render/<task_id>/")
@@ -584,10 +597,29 @@ def delete_task(task_id):
         task = next((item for item in tasks if item["id"] == task_id), None)
         if not task:
             abort(404)
-        if task.get("status") in {"queued", "rendering"}:
-            return jsonify({"ok": False, "error": "渲染中的任务不能删除"}), 409
+        # V129: 渲染中也能删 — 杀进程 + 删 output_dir + source_path + task 记录
+        # 先标记状态, 防止 _run 还在写时 race
         _write_tasks([item for item in tasks if item["id"] != task_id])
-    shutil.rmtree(task["output_dir"], ignore_errors=True)
+        output_dir = Path(task["output_dir"])
+        source_path_str = task.get("source_path") or ""
+    process = _task_processes.get(task_id)
+    if process:
+        try:
+            process.kill()
+            process.wait(timeout=10)
+            _log_status(logging.INFO, "[%s] killed render process", task_id)
+        except Exception as e:
+            _log_status(logging.WARNING, "[%s] kill failed: %s", task_id, e)
+        finally:
+            _task_processes.pop(task_id, None)
+    # 删输出目录 + raw 文件
+    shutil.rmtree(output_dir, ignore_errors=True)
+    source_path = Path(source_path_str)
+    if source_path.is_file() and source_path.parent == RAW_DIR.resolve():
+        try:
+            source_path.unlink()
+        except Exception:
+            pass
     return jsonify({"ok": True, "task_id": task_id})
 
 
