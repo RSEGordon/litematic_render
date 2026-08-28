@@ -47,6 +47,13 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.GameType;
+import net.minecraft.world.level.LevelSettings;
+import net.minecraft.world.level.WorldDataConfiguration;
+import net.minecraft.world.level.levelgen.FlatLevelSource;
+import net.minecraft.world.level.levelgen.WorldOptions;
+import net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorPresets;
+import net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorSettings;
+import net.minecraft.world.level.levelgen.presets.WorldPresets;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.clock.ClockNetworkState;
 import net.minecraft.world.clock.WorldClock;
@@ -136,8 +143,24 @@ public final class OffscreenRenderer {
                 worldStartRequested = true;
                 client.options.renderDistance().set(RENDER_DISTANCE_CHUNKS);
                 System.out.println("LITEMATIC_RENDER_STARTING_WORLD World renderDistance="
-                        + RENDER_DISTANCE_CHUNKS);
-                client.createWorldOpenFlows().openWorld("World", () -> client.setScreenAndShow(new TitleScreen()));
+                        + RENDER_DISTANCE_CHUNKS + " preset=the_void generator=FlatLevelSource");
+                LevelSettings levelSettings = new LevelSettings(
+                        "World", GameType.CREATIVE, LevelSettings.DifficultySettings.DEFAULT,
+                        true, WorldDataConfiguration.DEFAULT);
+                client.createWorldOpenFlows().createFreshLevel(
+                        "World",
+                        levelSettings,
+                        WorldOptions.defaultWithRandomSeed(),
+                        registries -> {
+                            FlatLevelGeneratorSettings theVoid = registries
+                                    .lookupOrThrow(Registries.FLAT_LEVEL_GENERATOR_PRESET)
+                                    .getOrThrow(FlatLevelGeneratorPresets.THE_VOID)
+                                    .value()
+                                    .settings();
+                            return WorldPresets.createNormalWorldDimensions(registries)
+                                    .replaceOverworldGenerator(registries, new FlatLevelSource(theVoid));
+                        },
+                        new TitleScreen());
             }
             return;
         }
