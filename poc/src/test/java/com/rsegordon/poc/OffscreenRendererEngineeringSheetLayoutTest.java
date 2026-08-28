@@ -71,21 +71,79 @@ class OffscreenRendererEngineeringSheetLayoutTest {
     }
 
     @Test
-    void axonsFitAssignedSlotsAndFacePrincipalCorners() {
+    void axonsFitAssignedSlotsAndSharePrincipalGridAnchors() {
         OffscreenRenderer.EngineeringSheetLayout layout=layout(48,16,16);
+        OffscreenRenderer.ViewPlacement right=layout.placement(OffscreenRenderer.View.LEFT_Z_NEG);
+        OffscreenRenderer.ViewPlacement back=layout.placement(OffscreenRenderer.View.BACK_X_NEG);
+        OffscreenRenderer.ViewPlacement top=layout.placement(OffscreenRenderer.View.TOP_X_UP);
+        OffscreenRenderer.ViewPlacement bottom=layout.placement(OffscreenRenderer.View.BOTTOM_X_UP);
         for (Map.Entry<OffscreenRenderer.View,OffscreenRenderer.CornerSlot> entry
                 :layout.axonSlotAssignments().entrySet()) {
             OffscreenRenderer.ViewPlacement placement=layout.placement(entry.getKey());
             OffscreenRenderer.LayoutRect slot=layout.axonSlots().get(entry.getValue());
             assertTrue(slot.contains(placement),entry.getKey().name());
             assertTrue(layout.drawingArea().contains(placement),entry.getKey().name());
-            assertEquals(0,layout.principalSafetyRect().intersectionArea(placement));
-            switch (entry.getValue()) {
-                case TOP_LEFT -> { assertEquals(slot.right(),placement.right()); assertEquals(slot.bottom(),placement.bottom()); }
-                case TOP_RIGHT -> { assertEquals(slot.x(),placement.x()); assertEquals(slot.bottom(),placement.bottom()); }
-                case BOTTOM_LEFT -> { assertEquals(slot.right(),placement.right()); assertEquals(slot.y(),placement.y()); }
-                case BOTTOM_RIGHT -> { assertEquals(slot.x(),placement.x()); assertEquals(slot.y(),placement.y()); }
+            OffscreenRenderer.ViewPlacement column=entry.getValue()==OffscreenRenderer.CornerSlot.TOP_LEFT
+                    ||entry.getValue()==OffscreenRenderer.CornerSlot.BOTTOM_LEFT?right:back;
+            OffscreenRenderer.ViewPlacement row=entry.getValue()==OffscreenRenderer.CornerSlot.TOP_LEFT
+                    ||entry.getValue()==OffscreenRenderer.CornerSlot.TOP_RIGHT?top:bottom;
+            assertTrue(Math.abs(column.centerX()-placement.centerX())<=1,entry.getKey().name());
+            assertTrue(Math.abs(row.centerY()-placement.centerY())<=1,entry.getKey().name());
+        }
+    }
+
+    @Test
+    void principalGapsAreTwentyPercentWider() {
+        OffscreenRenderer.EngineeringSheetLayout layout=layout(16,16,48);
+        assertEquals(43,layout.principalGapX());
+        assertEquals(58,layout.principalGapY());
+    }
+
+    @Test
+    void sheetUiScaleClampsAndScalesEveryMaterialMetric() {
+        OffscreenRenderer.SheetUiMetrics small=OffscreenRenderer.sheetUiMetrics(1024,768,16);
+        OffscreenRenderer.SheetUiMetrics standard=OffscreenRenderer.sheetUiMetrics(4096,3072,16);
+        OffscreenRenderer.SheetUiMetrics large=OffscreenRenderer.sheetUiMetrics(8192,6144,16);
+        assertEquals(0.85,small.scale());
+        assertEquals(1.0,standard.scale());
+        assertEquals(2.0,large.scale());
+        assertTrue(large.materialsBodyFont()>standard.materialsBodyFont());
+        assertTrue(large.iconSize()>standard.iconSize());
+        assertTrue(large.rowHeight()>standard.rowHeight());
+        assertTrue(large.columnGap()>standard.columnGap());
+        assertTrue(large.materialsHeight()>standard.materialsHeight());
+    }
+
+    @Test
+    void v142ModelShapesKeepEveryAxonAnchoredAndCollisionFree() {
+        int[][] dimensions={{16,16,48},{48,16,16},{12,64,12},{128,16,12}};
+        for (int[] dimension:dimensions) {
+            OffscreenRenderer.EngineeringSheetLayout layout=layout(dimension[0],dimension[1],dimension[2]);
+            for (OffscreenRenderer.View axon:OffscreenRenderer.View.values()) {
+                if (!axon.name().startsWith("AXON_")) continue;
+                OffscreenRenderer.ViewPlacement placement=layout.placement(axon);
+                assertTrue(layout.drawingArea().contains(placement),axon+" "+java.util.Arrays.toString(dimension));
+                for (OffscreenRenderer.View principal:OffscreenRenderer.View.values()) {
+                    if (principal.name().startsWith("AXON_")) continue;
+                    OffscreenRenderer.ViewPlacement p=layout.placement(principal);
+                    int overlapWidth=Math.max(0,Math.min(placement.right(),p.right())-Math.max(placement.x(),p.x()));
+                    int overlapHeight=Math.max(0,Math.min(placement.bottom(),p.bottom())-Math.max(placement.y(),p.y()));
+                    assertEquals(0,overlapWidth*overlapHeight,axon+" vs "+principal);
+                }
             }
+        }
+    }
+
+    @Test
+    void uiMetricsGrowAcrossRequestedCanvasLevels() {
+        int[] levels={2048,3072,4096};
+        int previousFont=0,previousIcon=0;
+        for (int level:levels) {
+            OffscreenRenderer.SheetUiMetrics ui=OffscreenRenderer.sheetUiMetrics(level,level,24);
+            assertTrue(ui.materialsBodyFont()>=previousFont);
+            assertTrue(ui.iconSize()>=previousIcon);
+            previousFont=ui.materialsBodyFont();
+            previousIcon=ui.iconSize();
         }
     }
 
