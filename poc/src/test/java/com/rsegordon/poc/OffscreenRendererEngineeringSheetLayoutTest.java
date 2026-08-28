@@ -64,6 +64,29 @@ class OffscreenRendererEngineeringSheetLayoutTest {
         assertEquals(normal.principalGroupTop(),hugeAxons.principalGroupTop());
         assertEquals(normal.principalMainRowY(),hugeAxons.principalMainRowY());
         assertEquals(normal.principalGroupBottom(),hugeAxons.principalGroupBottom());
+        assertEquals(normal.principalReservedRect(),hugeAxons.principalReservedRect());
+        for (OffscreenRenderer.View view:OffscreenRenderer.View.values())
+            if (!view.name().startsWith("AXON_"))
+                assertEquals(normal.placement(view),hugeAxons.placement(view),view.name());
+    }
+
+    @Test
+    void axonsFitAssignedSlotsAndFacePrincipalCorners() {
+        OffscreenRenderer.EngineeringSheetLayout layout=layout(48,16,16);
+        for (Map.Entry<OffscreenRenderer.View,OffscreenRenderer.CornerSlot> entry
+                :layout.axonSlotAssignments().entrySet()) {
+            OffscreenRenderer.ViewPlacement placement=layout.placement(entry.getKey());
+            OffscreenRenderer.LayoutRect slot=layout.axonSlots().get(entry.getValue());
+            assertTrue(slot.contains(placement),entry.getKey().name());
+            assertTrue(layout.drawingArea().contains(placement),entry.getKey().name());
+            assertEquals(0,layout.principalSafetyRect().intersectionArea(placement));
+            switch (entry.getValue()) {
+                case TOP_LEFT -> { assertEquals(slot.right(),placement.right()); assertEquals(slot.bottom(),placement.bottom()); }
+                case TOP_RIGHT -> { assertEquals(slot.x(),placement.x()); assertEquals(slot.bottom(),placement.bottom()); }
+                case BOTTOM_LEFT -> { assertEquals(slot.right(),placement.right()); assertEquals(slot.y(),placement.y()); }
+                case BOTTOM_RIGHT -> { assertEquals(slot.x(),placement.x()); assertEquals(slot.y(),placement.y()); }
+            }
+        }
     }
 
     @Test

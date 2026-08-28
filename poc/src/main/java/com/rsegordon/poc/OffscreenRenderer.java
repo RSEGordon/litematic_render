@@ -431,13 +431,21 @@ public final class OffscreenRenderer {
             int height=Math.max(0,Math.min(bottom(),placement.bottom())-Math.max(y,placement.y()));
             return width*height;
         }
+        boolean contains(ViewPlacement placement) {
+            return placement.x()>=x && placement.y()>=y
+                    && placement.right()<=right() && placement.bottom()<=bottom();
+        }
     }
+
+    enum CornerSlot { TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT }
 
     record EngineeringSheetLayout(int canvasWidth, int canvasHeight,
             int drawingTop, int drawingBottom, int drawingCenterY,
             int principalGroupTop, int principalGroupBottom, int principalMainRowY,
             int principalGapX, int principalGapY, int drawingsBottom,
-            LayoutRect principalReservedRect,Map<View,ViewPlacement> placements) {
+            LayoutRect drawingArea,LayoutRect principalReservedRect,LayoutRect principalSafetyRect,
+            Map<CornerSlot,LayoutRect> axonSlots,Map<View,CornerSlot> axonSlotAssignments,
+            Map<View,ViewPlacement> placements) {
         ViewPlacement placement(View view) {
             ViewPlacement placement=placements.get(view);
             if (placement==null) throw new IllegalArgumentException("Missing placement for "+view);
@@ -459,24 +467,27 @@ public final class OffscreenRenderer {
         mainWidth+=gapX*(main.length-1);
         java.awt.Dimension top=fittedSizes.get(View.TOP_X_UP),bottom=fittedSizes.get(View.BOTTOM_X_UP);
         int groupHeight=top.height+gapY+mainHeight+gapY+bottom.height;
-        int halfSlotHeight=Math.max(1,(groupHeight-gapY)/2);
-        fitAxonHeight(fittedSizes,View.AXON_X_POS_Z_POS,halfSlotHeight);
-        fitAxonHeight(fittedSizes,View.AXON_X_NEG_Z_POS,halfSlotHeight);
-        fitAxonHeight(fittedSizes,View.AXON_X_POS_Z_NEG,halfSlotHeight);
-        fitAxonHeight(fittedSizes,View.AXON_X_NEG_Z_NEG,halfSlotHeight);
-        int leftCorner=Math.max(fittedSizes.get(View.AXON_X_POS_Z_POS).width,
-                fittedSizes.get(View.AXON_X_POS_Z_NEG).width);
-        int rightCorner=Math.max(fittedSizes.get(View.AXON_X_NEG_Z_POS).width,
-                fittedSizes.get(View.AXON_X_NEG_Z_NEG).width);
-        int drawingWidth=leftCorner+gapX+mainWidth+gapX+rightCorner;
-        // Principal geometry alone defines the drawing Y coordinate system.
-        // Axonometric content is fitted into its corner bands above/below the main row.
-        int drawingHeight=groupHeight;
+        int maxPrincipalWidth=0,maxPrincipalHeight=0;
+        for (View view:View.values()) if (!view.name().startsWith("AXON_")) {
+            java.awt.Dimension size=fittedSizes.get(view);
+            maxPrincipalWidth=Math.max(maxPrincipalWidth,size.width);
+            maxPrincipalHeight=Math.max(maxPrincipalHeight,size.height);
+        }
+        // Axon slot geometry depends only on the frozen principal geometry.
+        int safetyX=Math.max(16,Math.min(48,margin/2)),safetyY=safetyX;
+        int axonGapX=Math.max(20,Math.min(32,gapX));
+        int axonGapY=Math.max(20,Math.min(32,gapY));
+        int slotWidth=Math.max(80,(int)Math.round(maxPrincipalWidth*0.80));
+        int slotHeight=Math.max(80,(int)Math.round(maxPrincipalHeight*0.80));
+        int sideBand=safetyX+axonGapX+slotWidth;
+        int verticalBand=safetyY+axonGapY+slotHeight;
+        int drawingWidth=sideBand+mainWidth+sideBand;
+        int drawingHeight=verticalBand+groupHeight+verticalBand;
         int drawingTop=margin+titleHeight,drawingBottom=drawingTop+drawingHeight;
         int drawingCenter=(drawingTop+drawingBottom)/2;
         int groupTop=drawingCenter-groupHeight/2;
         int mainY=groupTop+top.height+gapY;
-        int mainX=margin+leftCorner+gapX;
+        int mainX=margin+sideBand;
         Map<View,ViewPlacement> placements=new java.util.EnumMap<>(View.class);
         for (View view:main) {
             java.awt.Dimension size=fittedSizes.get(view);
@@ -488,33 +499,48 @@ public final class OffscreenRenderer {
                 front.centerX()-top.width/2,mainY-gapY-top.height,top.width,top.height));
         placements.put(View.BOTTOM_X_UP,new ViewPlacement(View.BOTTOM_X_UP,
                 front.centerX()-bottom.width/2,mainY+mainHeight+gapY,bottom.width,bottom.height));
-        LayoutRect reserved=new LayoutRect(margin+leftCorner,groupTop-gapY,
-                mainWidth+gapX*2,groupHeight+gapY*2);
-        putCorner(placements,fittedSizes,View.AXON_X_POS_Z_POS,margin,drawingTop);
-        putCorner(placements,fittedSizes,View.AXON_X_NEG_Z_POS,
-                margin+drawingWidth-fittedSizes.get(View.AXON_X_NEG_Z_POS).width,drawingTop);
-        putCorner(placements,fittedSizes,View.AXON_X_POS_Z_NEG,margin,
-                drawingBottom-fittedSizes.get(View.AXON_X_POS_Z_NEG).height);
-        putCorner(placements,fittedSizes,View.AXON_X_NEG_Z_NEG,
-                margin+drawingWidth-fittedSizes.get(View.AXON_X_NEG_Z_NEG).width,
-                drawingBottom-fittedSizes.get(View.AXON_X_NEG_Z_NEG).height);
+        LayoutRect reserved=new LayoutRect(margin+sideBand,groupTop,mainWidth,groupHeight);
+        LayoutRect safety=new LayoutRect(reserved.x()-safetyX,reserved.y()-safetyY,
+                reserved.width()+safetyX*2,reserved.height()+safetyY*2);
+        LayoutRect drawingArea=new LayoutRect(margin,drawingTop,drawingWidth,drawingHeight);
+        Map<CornerSlot,LayoutRect> slots=new java.util.EnumMap<>(CornerSlot.class);
+        slots.put(CornerSlot.TOP_LEFT,new LayoutRect(drawingArea.x(),drawingArea.y(),
+                safety.x()-axonGapX-drawingArea.x(),safety.y()-axonGapY-drawingArea.y()));
+        slots.put(CornerSlot.TOP_RIGHT,new LayoutRect(safety.right()+axonGapX,drawingArea.y(),
+                drawingArea.right()-safety.right()-axonGapX,safety.y()-axonGapY-drawingArea.y()));
+        slots.put(CornerSlot.BOTTOM_LEFT,new LayoutRect(drawingArea.x(),safety.bottom()+axonGapY,
+                safety.x()-axonGapX-drawingArea.x(),drawingArea.bottom()-safety.bottom()-axonGapY));
+        slots.put(CornerSlot.BOTTOM_RIGHT,new LayoutRect(safety.right()+axonGapX,safety.bottom()+axonGapY,
+                drawingArea.right()-safety.right()-axonGapX,
+                drawingArea.bottom()-safety.bottom()-axonGapY));
+        Map<View,CornerSlot> assignments=new java.util.EnumMap<>(View.class);
+        assignments.put(View.AXON_X_POS_Z_POS,CornerSlot.TOP_LEFT);
+        assignments.put(View.AXON_X_NEG_Z_POS,CornerSlot.TOP_RIGHT);
+        assignments.put(View.AXON_X_POS_Z_NEG,CornerSlot.BOTTOM_LEFT);
+        assignments.put(View.AXON_X_NEG_Z_NEG,CornerSlot.BOTTOM_RIGHT);
+        for (Map.Entry<View,CornerSlot> entry:assignments.entrySet())
+            putAxonInSlot(placements,fittedSizes,entry.getKey(),slots.get(entry.getValue()),entry.getValue());
         int canvasHeight=drawingBottom+scaleBarHeight+materialsHeight+margin;
         return new EngineeringSheetLayout(margin*2+drawingWidth,canvasHeight,drawingTop,
                 drawingBottom,drawingCenter,groupTop,groupTop+groupHeight,mainY,gapX,gapY,
-                drawingBottom,reserved,java.util.Collections.unmodifiableMap(placements));
+                drawingBottom,drawingArea,reserved,safety,
+                java.util.Collections.unmodifiableMap(slots),
+                java.util.Collections.unmodifiableMap(assignments),
+                java.util.Collections.unmodifiableMap(placements));
     }
 
-    private static void fitAxonHeight(Map<View,java.awt.Dimension> sizes,View view,int maxHeight) {
+    private static void putAxonInSlot(Map<View,ViewPlacement> placements,
+            Map<View,java.awt.Dimension> sizes,View view,LayoutRect slot,CornerSlot corner) {
         java.awt.Dimension size=sizes.get(view);
-        if (size.height<=maxHeight) return;
-        double fit=maxHeight/(double)size.height;
-        sizes.put(view,new java.awt.Dimension(Math.max(1,(int)Math.round(size.width*fit)),maxHeight));
-    }
-
-    private static void putCorner(Map<View,ViewPlacement> placements,
-            Map<View,java.awt.Dimension> sizes,View view,int x,int y) {
-        java.awt.Dimension size=sizes.get(view);
-        placements.put(view,new ViewPlacement(view,x,y,size.width,size.height));
+        double scale=Math.min(1.0,Math.min(slot.width()/(double)Math.max(1,size.width),
+                slot.height()/(double)Math.max(1,size.height)));
+        int width=Math.max(1,Math.min(slot.width(),(int)Math.floor(size.width*scale)));
+        int height=Math.max(1,Math.min(slot.height(),(int)Math.floor(size.height*scale)));
+        int x=(corner==CornerSlot.TOP_LEFT || corner==CornerSlot.BOTTOM_LEFT)
+                ? slot.right()-width : slot.x();
+        int y=(corner==CornerSlot.TOP_LEFT || corner==CornerSlot.TOP_RIGHT)
+                ? slot.bottom()-height : slot.y();
+        placements.put(view,new ViewPlacement(view,x,y,width,height));
     }
 
     static ProjectedSpan projectedSpan(double minX, double minY, double minZ,
@@ -1938,13 +1964,15 @@ public final class OffscreenRenderer {
                     sizes.put(view,new java.awt.Dimension(width,height));
                 }
             }
+            progress.emit(78,"BUILD_PRINCIPAL_LAYOUT",null,"Freezing principal layout");
+            progress.emit(80,"BUILD_AXON_SLOTS",null,"Building principal corner slots");
             engineeringSheetLayout=OffscreenRenderer.buildEngineeringSheetLayout(sizes,margin,titleH,
                     gapX,gapY,scaleBarH,materialsH);
-            progress.emit(80,"BUILD_AXON_LAYOUT",null,"Fitting axonometric slots");
+            progress.emit(82,"FIT_AXON_VIEWS",null,"Fitting axonometric views into slots");
             logPrincipalViewSizes(sizeX,sizeY,sizeZ,principalScale);
             logEngineeringSheetLayout(engineeringSheetLayout);
             validateEngineeringSheetLayout(engineeringSheetLayout);
-            progress.emit(83,"COLLISION_CHECK",null,"Validating view collisions");
+            progress.emit(83,"AXON_COLLISION_CHECK",null,"Validating view collisions");
         }
 
         private void assembleStyle(Style outputStyle, String suffix) throws Exception {
@@ -2182,9 +2210,22 @@ public final class OffscreenRenderer {
                 System.out.printf("PRINCIPAL_PLACEMENT view=%s x=%d y=%d width=%d height=%d%n",
                         view,p.x(),p.y(),p.width(),p.height());
             }
+            System.out.printf("PRINCIPAL_LAYOUT_SNAPSHOT phase=BEFORE_AXON hash=%d rect=%s%n",
+                    principalLayoutHash(layout),layout.principalReservedRect());
+            System.out.println("AXON_LAYOUT_BEGIN");
+            for (Map.Entry<View,CornerSlot> entry:layout.axonSlotAssignments().entrySet()) {
+                ViewPlacement p=layout.placement(entry.getKey());
+                LayoutRect slot=layout.axonSlots().get(entry.getValue());
+                System.out.printf(Locale.ROOT,
+                        "AXON_PLACEMENT view=%s slot=%s slotSize=[%d,%d] rect=[%d,%d,%d,%d]%n",
+                        entry.getKey(),entry.getValue(),slot.width(),slot.height(),
+                        p.x(),p.y(),p.width(),p.height());
+            }
+            System.out.println("AXON_LAYOUT_DONE");
         }
 
         private static void validateEngineeringSheetLayout(EngineeringSheetLayout layout) {
+            int principalHashBefore=principalLayoutHash(layout);
             int groupCenter=(layout.principalGroupTop()+layout.principalGroupBottom())/2;
             int centerDelta=Math.abs(groupCenter-layout.drawingCenterY());
             System.out.printf("PRINCIPAL_GROUP_CENTER drawingCenterY=%d groupCenterY=%d delta=%d result=%s%n",
@@ -2210,6 +2251,20 @@ public final class OffscreenRenderer {
             boolean collisions=false;
             for (View axon:View.values()) if (!isPrincipalView(axon)) {
                 ViewPlacement axonPlacement=layout.placement(axon);
+                CornerSlot corner=layout.axonSlotAssignments().get(axon);
+                LayoutRect slot=layout.axonSlots().get(corner);
+                boolean insideSlot=slot.contains(axonPlacement);
+                boolean insideDrawing=layout.drawingArea().contains(axonPlacement);
+                int safetyIntersection=layout.principalSafetyRect().intersectionArea(axonPlacement);
+                System.out.printf("AXON_SLOT_CHECK view=%s slot=%s rect=[%d,%d,%d,%d] "
+                                +"slotRect=[%d,%d,%d,%d] inside=%s result=%s%n",
+                        axon,corner,axonPlacement.x(),axonPlacement.y(),axonPlacement.width(),axonPlacement.height(),
+                        slot.x(),slot.y(),slot.width(),slot.height(),insideSlot,insideSlot?"PASS":"FAIL");
+                System.out.printf("AXON_DRAWING_BOUNDS_CHECK view=%s insideDrawingArea=%s result=%s%n",
+                        axon,insideDrawing,insideDrawing?"PASS":"FAIL");
+                System.out.printf("AXON_SAFETY_COLLISION_CHECK view=%s intersectionArea=%d result=%s%n",
+                        axon,safetyIntersection,safetyIntersection==0?"PASS":"FAIL");
+                collisions|=!insideSlot || !insideDrawing || safetyIntersection!=0;
                 for (View principal:View.values()) if (isPrincipalView(principal)) {
                     ViewPlacement p=layout.placement(principal);
                     int width=Math.max(0,Math.min(axonPlacement.right(),p.right())
@@ -2222,9 +2277,31 @@ public final class OffscreenRenderer {
                     collisions|=area!=0;
                 }
             }
+            View[] axons={View.AXON_X_POS_Z_POS,View.AXON_X_NEG_Z_POS,
+                    View.AXON_X_POS_Z_NEG,View.AXON_X_NEG_Z_NEG};
+            for (int i=0;i<axons.length;i++) for (int j=i+1;j<axons.length;j++) {
+                ViewPlacement first=layout.placement(axons[i]),second=layout.placement(axons[j]);
+                int width=Math.max(0,Math.min(first.right(),second.right())-Math.max(first.x(),second.x()));
+                int height=Math.max(0,Math.min(first.bottom(),second.bottom())-Math.max(first.y(),second.y()));
+                int area=width*height;
+                System.out.printf("AXON_COLLISION_CHECK first=%s second=%s intersectionArea=%d result=%s%n",
+                        axons[i],axons[j],area,area==0?"PASS":"FAIL");
+                collisions|=area!=0;
+            }
+            System.out.printf("PRINCIPAL_LAYOUT_SNAPSHOT phase=AFTER_AXON hash=%d rect=%s%n",
+                    principalLayoutHash(layout),layout.principalReservedRect());
+            System.out.printf("PRINCIPAL_LAYOUT_FROZEN result=%s%n",
+                    principalHashBefore==principalLayoutHash(layout)?"PASS":"FAIL");
             if (centerDelta>1 || topDelta!=0 || bottomDelta!=0 || centerMax>1 || !dependencies)
                 throw new IllegalStateException("Shared engineering sheet layout validation failed");
             if (collisions) throw new IllegalStateException("Axonometric view overlaps principal reserved area");
+        }
+
+        private static int principalLayoutHash(EngineeringSheetLayout layout) {
+            int hash=1;
+            for (View view:View.values()) if (isPrincipalView(view))
+                hash=31*hash+layout.placement(view).hashCode();
+            return hash;
         }
 
         private static boolean withinPixel(int left,int right) { return Math.abs(left-right)<=1; }
