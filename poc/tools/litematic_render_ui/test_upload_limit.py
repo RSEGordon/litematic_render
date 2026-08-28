@@ -62,7 +62,7 @@ class UploadLimitTest(unittest.TestCase):
         )
         self.assertLess(abs(render_app._axon_farthest_corner_distance(dimensions) - java_distance), 0.01)
 
-    def test_oversized_upload_returns_413_and_leaves_no_file_or_task(self):
+    def test_legacy_oversized_upload_is_queued_for_runtime_validation(self):
         flask_app = Flask(__name__)
         flask_app.register_blueprint(render_app.bp)
         with tempfile.TemporaryDirectory() as directory:
@@ -78,24 +78,31 @@ class UploadLimitTest(unittest.TestCase):
                     mock.patch.object(render_app, "_read_litematic_metadata",
                                       return_value=metadata), \
                     mock.patch.object(render_app, "_read_render_dimensions",
-                                      return_value=(550, 10, 10)):
+                                      return_value=(550, 10, 10)), \
+                    mock.patch.object(render_app.threading, "Thread") as thread:
                 response = flask_app.test_client().post(
                     "/tools/litematic_render/upload",
                     data={"litematic": (io.BytesIO(b"fixture"), "cathedral.litematic")},
                 )
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.get_json()["ok"])
+                tasks = render_app._read_tasks()
+                self.assertEqual(len(tasks), 1)
+                self.assertIn("legacyResult=OVER", tasks[0]["render_size_check"])
+                self.assertIn("runtimeAuthoritative=true", tasks[0]["render_size_check"])
+                self.assertTrue((raw_dir / "cathedral.litematic").is_file())
+                thread.return_value.start.assert_called_once_with()
 
-            self.assertEqual(response.status_code, 413)
-            self.assertEqual(response.get_json(), {
-                "error": "投影超出安全渲染视距",
-                "dimensions": "550 × 10 × 10",
-                "farthest_distance": 509.51,
-                "safe_limit": 480,
-                "hard_limit": 512,
-                "render_distance_chunks": 32,
-                "safety_chunks": 2,
-            })
-            self.assertFalse(tasks_file.exists())
-            self.assertEqual(list(raw_dir.iterdir()), [])
+    def test_runtime_chunk_coverage_failure_has_authoritative_ui_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_file = Path(directory) / "render.log"
+            log_file.write_text(
+                "CHUNK_COVERAGE view=FRONT_X_POS outside=3 result=FAIL\n",
+                encoding="utf-8",
+            )
+            message = render_app._runtime_failure_message(log_file, 1)
+        self.assertIn("投影超出当前实际 Chunk 加载范围", message)
+        self.assertNotIn("安全渲染视距", message)
 
 
 if __name__ == "__main__":

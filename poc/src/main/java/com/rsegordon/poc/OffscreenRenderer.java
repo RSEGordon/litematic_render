@@ -239,6 +239,9 @@ public final class OffscreenRenderer {
                         SectionPos.blockToSectionCoord((int)Math.ceil(job.maxX)),
                         SectionPos.blockToSectionCoord((int)Math.ceil(job.maxY)),
                         SectionPos.blockToSectionCoord((int)Math.ceil(job.maxZ)));
+                job.meshInvalidatedAt = System.nanoTime();
+                System.out.printf("PAPER_MESH_REBUILD pass=%s requested=true settled=false invalidateNanos=%d%n",
+                        job.capturePass,job.meshInvalidatedAt);
                 job.passRebuildPending = false;
                 job.wait = -120;
                 return;
@@ -364,6 +367,9 @@ public final class OffscreenRenderer {
         boolean materialCapture, materialFrameReady;
         int materialCapturePhase, materialWait, writtenSingleViews;
         long passStarted, viewStarted, materialStarted;
+        long meshInvalidatedAt;
+        int matteBlackFrame,matteCameraHash;
+        long matteGeometryRevision;
         int wait, view, tickCount;
         int captureWidth, captureHeight;
         NativeImage blackPass;
@@ -379,6 +385,11 @@ public final class OffscreenRenderer {
         String lastEntityDiagnosticKey, lastProjectionDiagnosticKey;
         // Per-view saved native image (post alpha matting) for composite assembly
         final NativeImage[] composites = new NativeImage[View.values().length];
+        final float[] principalHalfSizes = new float[View.values().length];
+        final int[] principalCaptureWidths = new int[View.values().length];
+        final int[] principalCaptureHeights = new int[View.values().length];
+        final Map<View,int[]> paperPrincipalRects = new HashMap<>();
+        final Map<View,int[]> blueprintPrincipalRects = new HashMap<>();
         Job(Path input, Path out, String title) {
             this.input=input;
             this.out=out;
@@ -711,6 +722,9 @@ public final class OffscreenRenderer {
             // before the next extraction and includes newly non-empty sections.
             client.levelRenderer.invalidateCompiledGeometry(
                     client.level,client.options,client.gameRenderer.mainCamera(),client.getBlockColors());
+            meshInvalidatedAt = System.nanoTime();
+            System.out.printf("PAPER_MESH_REBUILD pass=%s requested=true settled=false invalidateNanos=%d%n",
+                    capturePass,meshInvalidatedAt);
             loaded=true;
             System.out.printf("  - loaded: %dx%dx%d palette=%d tiles=%d entities=%d mounted=%d%n  - elapsed: %d ms%n  - bounds: [%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]%n",
                     sx,sy,sz,palette.size(),tiles.size(),entityCount,mountedEntityCount,
@@ -1204,6 +1218,28 @@ public final class OffscreenRenderer {
         void requestBlackPass(Minecraft client) {
             View captureView = View.values()[Math.min(view, View.values().length - 1)];
             viewStarted = System.nanoTime();
+            if (isPrincipalView(captureView)) {
+                principalHalfSizes[captureView.ordinal()] = activeView.halfSize();
+                principalCaptureWidths[captureView.ordinal()] = client.gameRenderer.mainRenderTarget().width;
+                principalCaptureHeights[captureView.ordinal()] = client.gameRenderer.mainRenderTarget().height;
+            }
+            if (capturePass == CapturePass.PAPER_COLOR && isPrincipalView(captureView)) {
+                long captureNanos=System.nanoTime();
+                System.out.printf(Locale.ROOT,
+                        "PAPER_VIEW_STATE view=%s capturePass=%s paperFullbright=%s nightVision=%.1f "
+                                + "gamma=%.1f time=%d BackgroundPassWhite=%s camera=%s targetSize=%dx%d%n",
+                        captureView,capturePass,isPaperFullbright(),activeNightVision(),activeGamma(),
+                        client.level.getOverworldClockTime(),BackgroundPass.isWhite(),activeView.position(),
+                        client.gameRenderer.mainRenderTarget().width,client.gameRenderer.mainRenderTarget().height);
+                System.out.printf(Locale.ROOT,
+                        "PAPER_MESH_REBUILD pass=PAPER_COLOR requested=true settled=true "
+                                + "invalidateNanos=%d captureNanos=%d elapsedMs=%d%n",
+                        meshInvalidatedAt,captureNanos,meshInvalidatedAt == 0 ? -1
+                                : (captureNanos-meshInvalidatedAt)/1_000_000);
+            }
+            matteBlackFrame=tickCount;
+            matteCameraHash=activeView.hashCode();
+            matteGeometryRevision=meshInvalidatedAt;
             System.out.printf("PASS_START pass=%s view=%s%n", capturePass, captureView);
             System.out.printf("[STEP 5] capture views%n  - pass: %s%n  - view: %s%n  - status: started%n",
                     capturePass, captureView.name());
@@ -1228,6 +1264,14 @@ public final class OffscreenRenderer {
             blackPass = null;
             Screenshot.takeScreenshot(client.gameRenderer.mainRenderTarget(), whitePass -> {
                 try {
+                    boolean sameCamera=activeView!=null && matteCameraHash==activeView.hashCode();
+                    boolean sameGeometry=matteGeometryRevision==meshInvalidatedAt;
+                    System.out.printf("MATTE_PAIR view=%s cameraHash=%d geometryRevision=%d "
+                                    +"blackFrame=%d whiteFrame=%d sameCamera=%s sameGeometry=%s%n",
+                            view,matteCameraHash,matteGeometryRevision,matteBlackFrame,tickCount,
+                            sameCamera,sameGeometry);
+                    if (!sameCamera || !sameGeometry)
+                        throw new IllegalStateException("Matte pair state changed for "+view);
                     System.out.printf("MATTE %s corners black=%08x white=%08x%n",
                             view.name(), blackPassBackup.getPixel(0, 0), whitePass.getPixel(0, 0));
                     NativeImage image = matte(blackPassBackup, whitePass);
@@ -1248,11 +1292,19 @@ public final class OffscreenRenderer {
                         gammaCorrected.flush();
                         color.flush();
                     } else {
+                        if (isPrincipalView(view)) {
+                            writePaperDebug(color,view,"01_matte_raw");
+                            logPaperColorStats(view,"01_matte_raw",color);
+                        }
                         BufferedImage adjusted=applyPaperColor(color,
                                 positiveDoubleProperty("litematic.paper.brightness",0.97),
                                 positiveDoubleProperty("litematic.paper.contrast",1.05),
                                 positiveDoubleProperty("litematic.paper.saturation",1.00));
                         colorViews[view.ordinal()] = adjusted;
+                        if (isPrincipalView(view)) {
+                            writePaperDebug(adjusted,view,"02_adjusted");
+                            logPaperColorStats(view,"02_adjusted",adjusted);
+                        }
                         writeSingleView(adjusted, out.resolve(baseName + "_paper.png"));
                         writtenSingleViews++;
                         System.out.printf("[STEP 6] write single views%n  - count: %d%n  - path: %s%n  - elapsed: %d ms%n",
@@ -1563,6 +1615,7 @@ public final class OffscreenRenderer {
                     {View.LEFT_Z_NEG,View.FRONT_X_POS,View.RIGHT_Z_POS,View.BACK_X_NEG},
                     {View.AXON_X_POS_Z_NEG,View.TOP_X_UP,null,View.AXON_X_NEG_Z_NEG}};
             ContentBox[][] boxes=new ContentBox[3][4];
+            PrincipalProjectionFrame[][] principalFrames=new PrincipalProjectionFrame[3][4];
             int[] columnWidths=new int[4],rowHeights=new int[3];
             double sizeX=maxX-minX,sizeY=maxY-minY,sizeZ=maxZ-minZ;
             double maxPrincipalSpan=Math.max(sizeX,Math.max(sizeY,sizeZ));
@@ -1574,23 +1627,22 @@ public final class OffscreenRenderer {
                 View slot=slots[row][column];
                 if (slot==null) continue;
                 BufferedImage source=viewsFor(outputStyle)[slot.ordinal()];
-                ContentBox sourceBox=contentBox(source);
-                double fit;
                 if (isPrincipalView(slot)) {
-                    // Every principal capture has the same pixels-per-block.  Scale
-                    // its cropped pixels by the same factor; the crop is only a
-                    // positioning/spacing aid and must never determine scale.
-                    double capturePixelsPerBlock=source.getHeight()/(maxPrincipalSpan*1.2);
-                    fit=principalScale/capturePixelsPerBlock;
+                    PrincipalProjectionFrame frame=principalProjectionFrame(
+                            slot,source,sizeX,sizeY,sizeZ,principalScale);
+                    principalFrames[row][column]=frame;
+                    columnWidths[column]=Math.max(columnWidths[column],frame.sheetWidth());
+                    rowHeights[row]=Math.max(rowHeights[row],frame.sheetHeight());
                 } else {
                     // Axonometric views intentionally retain their independent fit.
-                    fit=Math.min(1.0,cell/(double)Math.max(sourceBox.width(),sourceBox.height()));
+                    ContentBox sourceBox=contentBox(source);
+                    double fit=Math.min(1.0,cell/(double)Math.max(sourceBox.width(),sourceBox.height()));
+                    int drawW=Math.max(1,(int)Math.round(sourceBox.width()*fit));
+                    int drawH=Math.max(1,(int)Math.round(sourceBox.height()*fit));
+                    boxes[row][column]=sourceBox.withDrawSize(drawW,drawH);
+                    columnWidths[column]=Math.max(columnWidths[column],drawW);
+                    rowHeights[row]=Math.max(rowHeights[row],drawH);
                 }
-                int drawW=Math.max(1,(int)Math.round(sourceBox.width()*fit));
-                int drawH=Math.max(1,(int)Math.round(sourceBox.height()*fit));
-                boxes[row][column]=sourceBox.withDrawSize(drawW,drawH);
-                columnWidths[column]=Math.max(columnWidths[column],drawW);
-                rowHeights[row]=Math.max(rowHeights[row],drawH);
             }
             logPrincipalViewSizes(sizeX,sizeY,sizeZ,principalScale);
             // Retain a fraction of the old cell breathing room, but measure all
@@ -1620,9 +1672,24 @@ public final class OffscreenRenderer {
             for (int i=1;i<4;i++) columnX[i]=columnX[i-1]+columnWidths[i-1]+gutterX;
             for (int i=1;i<3;i++) rowY[i]=rowY[i-1]+rowHeights[i-1]+gutterY;
             for (int row=0;row<3;row++) for (int column=0;column<4;column++) {
-                if (slots[row][column]!=null) drawViewContent(g,slots[row][column],boxes[row][column],
-                        columnX[column],rowY[row],columnWidths[column],rowHeights[row],outputStyle);
+                View slot=slots[row][column];
+                if (slot==null) continue;
+                if (isPrincipalView(slot)) {
+                    PrincipalProjectionFrame frame=principalFrames[row][column];
+                    int drawX=columnX[column]+(columnWidths[column]-frame.sheetWidth())/2;
+                    // A shared row origin is the engineering Y datum. No opaque-content centering.
+                    int drawY=rowY[row];
+                    frame=frame.withSheetPosition(drawX,drawY);
+                    principalFrames[row][column]=frame;
+                    drawPrincipalFrame(g,frame,outputStyle);
+                } else {
+                    drawViewContent(g,slot,boxes[row][column],columnX[column],rowY[row],
+                            columnWidths[column],rowHeights[row],outputStyle);
+                }
             }
+            validatePrincipalAlignment(principalFrames,outputStyle);
+            if (outputStyle == Style.PAPER && includeMaterials)
+                writePaperSheetCrops(canvas,principalFrames);
 
             java.awt.Color primary=outputStyle == Style.BLUEPRINT ? java.awt.Color.WHITE : java.awt.Color.BLACK;
             java.awt.Color secondary=outputStyle == Style.BLUEPRINT ? new java.awt.Color(232,238,244) : new java.awt.Color(101,94,84);
@@ -1670,6 +1737,141 @@ public final class OffscreenRenderer {
             logPrincipalViewSize(View.RIGHT_Z_POS,sizeZ,sizeY,pixelsPerBlock);
             logPrincipalViewSize(View.TOP_X_UP,sizeX,sizeZ,pixelsPerBlock);
             logPrincipalViewSize(View.BOTTOM_X_UP,sizeX,sizeZ,pixelsPerBlock);
+        }
+
+        private record PrincipalProjectionFrame(View view,double worldHorizontal,double worldVertical,
+                                                int captureX,int captureY,int captureWidth,int captureHeight,
+                                                int sheetX,int sheetY,int sheetWidth,int sheetHeight,
+                                                double pixelsPerBlock) {
+            PrincipalProjectionFrame withSheetPosition(int x,int y) {
+                return new PrincipalProjectionFrame(view,worldHorizontal,worldVertical,
+                        captureX,captureY,captureWidth,captureHeight,x,y,sheetWidth,sheetHeight,
+                        pixelsPerBlock);
+            }
+        }
+
+        private PrincipalProjectionFrame principalProjectionFrame(View view,BufferedImage source,
+                double sizeX,double sizeY,double sizeZ,double principalScale) {
+            double worldWidth=(view==View.LEFT_Z_NEG || view==View.RIGHT_Z_POS)?sizeZ:sizeX;
+            double worldHeight=(view==View.TOP_X_UP || view==View.BOTTOM_X_UP)?sizeZ:sizeY;
+            float halfSize=principalHalfSizes[view.ordinal()];
+            int capturedWidth=principalCaptureWidths[view.ordinal()];
+            int capturedHeight=principalCaptureHeights[view.ordinal()];
+            if (halfSize<=0 || capturedWidth!=source.getWidth() || capturedHeight!=source.getHeight())
+                throw new IllegalStateException("Missing principal capture geometry for "+view
+                        +": recorded="+capturedWidth+"x"+capturedHeight+" source="
+                        +source.getWidth()+"x"+source.getHeight()+" halfSize="+halfSize);
+            double capturePixelsPerBlock=source.getHeight()/(2.0*halfSize);
+            int cropWidth=Math.max(1,Math.min(source.getWidth(),
+                    (int)Math.round(worldWidth*capturePixelsPerBlock)));
+            int cropHeight=Math.max(1,Math.min(source.getHeight(),
+                    (int)Math.round(worldHeight*capturePixelsPerBlock)));
+            int cropX=Math.max(0,(source.getWidth()-cropWidth)/2);
+            int cropY=Math.max(0,(source.getHeight()-cropHeight)/2);
+            int drawWidth=Math.max(1,(int)Math.round(worldWidth*principalScale));
+            int drawHeight=Math.max(1,(int)Math.round(worldHeight*principalScale));
+            return new PrincipalProjectionFrame(view,worldWidth,worldHeight,cropX,cropY,cropWidth,
+                    cropHeight,0,0,drawWidth,drawHeight,principalScale);
+        }
+
+        private void drawPrincipalFrame(java.awt.Graphics2D g,PrincipalProjectionFrame frame,Style style) {
+            BufferedImage source=viewsFor(style)[frame.view().ordinal()];
+            g.drawImage(source,frame.sheetX(),frame.sheetY(),
+                    frame.sheetX()+frame.sheetWidth(),frame.sheetY()+frame.sheetHeight(),
+                    frame.captureX(),frame.captureY(),frame.captureX()+frame.captureWidth(),
+                    frame.captureY()+frame.captureHeight(),null);
+            System.out.printf(Locale.ROOT,
+                    "PRINCIPAL_FRAME style=%s view=%s worldHorizontal=%.4f worldVertical=%.4f "
+                            +"capture=(%d,%d %dx%d) sheetX=%d sheetY=%d sheetWidth=%d "
+                            +"sheetHeight=%d pixelsPerBlock=%.6f%n",
+                    style,frame.view(),frame.worldHorizontal(),frame.worldVertical(),frame.captureX(),
+                    frame.captureY(),frame.captureWidth(),frame.captureHeight(),frame.sheetX(),
+                    frame.sheetY(),frame.sheetWidth(),frame.sheetHeight(),frame.pixelsPerBlock());
+            int[] rect={frame.sheetX(),frame.sheetY(),frame.sheetWidth(),frame.sheetHeight()};
+            Map<View,int[]> own=style==Style.PAPER?paperPrincipalRects:blueprintPrincipalRects;
+            Map<View,int[]> other=style==Style.PAPER?blueprintPrincipalRects:paperPrincipalRects;
+            own.put(frame.view(),rect);
+            int[] prior=other.get(frame.view());
+            boolean parity=prior==null || java.util.Arrays.equals(prior,rect);
+            System.out.printf("STYLE_FRAME_PARITY view=%s paperRect=%s blueprintRect=%s result=%s%n",
+                    frame.view(),java.util.Arrays.toString(style==Style.PAPER?rect:prior),
+                    java.util.Arrays.toString(style==Style.BLUEPRINT?rect:prior),parity?"PASS":"FAIL");
+            if (!parity) throw new IllegalStateException("Paper/Blueprint principal frame mismatch: "+frame.view());
+        }
+
+        private static PrincipalProjectionFrame findFrame(PrincipalProjectionFrame[][] frames,View view) {
+            for (PrincipalProjectionFrame[] row:frames) for (PrincipalProjectionFrame frame:row)
+                if (frame!=null && frame.view()==view) return frame;
+            throw new IllegalStateException("Missing principal frame "+view);
+        }
+
+        private static void validatePrincipalAlignment(PrincipalProjectionFrame[][] frames,Style style) {
+            PrincipalProjectionFrame left=findFrame(frames,View.LEFT_Z_NEG);
+            PrincipalProjectionFrame front=findFrame(frames,View.FRONT_X_POS);
+            PrincipalProjectionFrame right=findFrame(frames,View.RIGHT_Z_POS);
+            PrincipalProjectionFrame back=findFrame(frames,View.BACK_X_NEG);
+            PrincipalProjectionFrame top=findFrame(frames,View.TOP_X_UP);
+            PrincipalProjectionFrame bottom=findFrame(frames,View.BOTTOM_X_UP);
+            boolean height=left.sheetY()==front.sheetY() && front.sheetY()==right.sheetY()
+                    && right.sheetY()==back.sheetY()
+                    && withinPixel(left.sheetHeight(),front.sheetHeight())
+                    && withinPixel(front.sheetHeight(),right.sheetHeight())
+                    && withinPixel(right.sheetHeight(),back.sheetHeight());
+            boolean xSpan=withinPixel(front.sheetWidth(),back.sheetWidth())
+                    && withinPixel(front.sheetWidth(),top.sheetWidth())
+                    && withinPixel(front.sheetWidth(),bottom.sheetWidth());
+            boolean zSpan=withinPixel(left.sheetWidth(),right.sheetWidth())
+                    && withinPixel(left.sheetWidth(),top.sheetHeight())
+                    && withinPixel(left.sheetWidth(),bottom.sheetHeight());
+            System.out.printf("PRINCIPAL_ALIGNMENT_CHECK style=%s height=%s xSpan=%s zSpan=%s result=%s%n",
+                    style,height?"PASS":"FAIL",xSpan?"PASS":"FAIL",zSpan?"PASS":"FAIL",
+                    height&&xSpan&&zSpan?"PASS":"FAIL");
+            if (!height) System.out.println("PRINCIPAL_ALIGNMENT_FAIL type=HEIGHT");
+            if (!xSpan) System.out.println("PRINCIPAL_ALIGNMENT_FAIL type=X_SPAN");
+            if (!zSpan) System.out.println("PRINCIPAL_ALIGNMENT_FAIL type=Z_SPAN");
+            if (!(height&&xSpan&&zSpan)) throw new IllegalStateException("Principal engineering alignment failed");
+        }
+
+        private static boolean withinPixel(int left,int right) { return Math.abs(left-right)<=1; }
+
+        private void writePaperDebug(BufferedImage image,View view,String stage) throws Exception {
+            Path directory=out.resolve("debug_paper");
+            Files.createDirectories(directory);
+            ImageIO.write(image,"PNG",directory.resolve(view.name().toLowerCase(Locale.ROOT)
+                    +"_"+stage+".png").toFile());
+        }
+
+        private void writePaperSheetCrops(BufferedImage sheet,PrincipalProjectionFrame[][] frames) throws Exception {
+            for (PrincipalProjectionFrame[] row:frames) for (PrincipalProjectionFrame frame:row) {
+                if (frame==null) continue;
+                BufferedImage crop=new BufferedImage(frame.sheetWidth(),frame.sheetHeight(),BufferedImage.TYPE_INT_ARGB);
+                java.awt.Graphics2D graphics=crop.createGraphics();
+                graphics.drawImage(sheet,0,0,frame.sheetWidth(),frame.sheetHeight(),frame.sheetX(),
+                        frame.sheetY(),frame.sheetX()+frame.sheetWidth(),frame.sheetY()+frame.sheetHeight(),null);
+                graphics.dispose();
+                writePaperDebug(crop,frame.view(),"03_sheet_crop");
+                logPaperColorStats(frame.view(),"03_sheet_crop",crop);
+                crop.flush();
+            }
+        }
+
+        private static void logPaperColorStats(View view,String stage,BufferedImage image) {
+            long count=0; double saturationSum=0;
+            int[] histogram=new int[101];
+            java.util.HashSet<Integer> colors=new java.util.HashSet<>();
+            for (int y=0;y<image.getHeight();y++) for (int x=0;x<image.getWidth();x++) {
+                int pixel=image.getRGB(x,y);
+                if ((pixel>>>24)==0) continue;
+                float[] hsb=java.awt.Color.RGBtoHSB((pixel>>>16)&255,(pixel>>>8)&255,pixel&255,null);
+                int bucket=Math.min(100,(int)Math.floor(hsb[1]*100));
+                histogram[bucket]++; saturationSum+=hsb[1]; count++; colors.add(pixel&0x00ffffff);
+            }
+            long threshold=(long)Math.ceil(count*0.9),seen=0; int p90=0;
+            for (int index=0;index<histogram.length;index++) { seen+=histogram[index]; if (seen>=threshold) { p90=index; break; } }
+            System.out.printf(Locale.ROOT,
+                    "PAPER_COLOR_STATS view=%s stage=%s nonTransparentPixels=%d meanSaturation=%.6f "
+                            +"p90Saturation=%.2f uniqueColorCount=%d%n",
+                    view,stage,count,count==0?0:saturationSum/count,p90/100.0,colors.size());
         }
 
         private static void logPrincipalViewSize(View view,double worldWidth,double worldHeight,

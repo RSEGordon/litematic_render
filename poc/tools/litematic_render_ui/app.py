@@ -388,7 +388,7 @@ def _axon_farthest_corner_distance(dimensions):
 
 
 def _safe_render_distance_blocks():
-    """Conservative upload preflight only; Java runtime chunk validation is authoritative."""
+    """Legacy comparison threshold; never an upload admission decision."""
     return max(1, RENDER_DISTANCE_CHUNKS - RENDER_DISTANCE_SAFETY_CHUNKS) * 16
 
 
@@ -514,9 +514,10 @@ def _run(task_id):
         }
         returncode = result if isinstance(result, int) else getattr(result, "returncode", -1)
         complete = returncode == 0 and all(outputs[k] for k in ("paper", "blueprint", "workbook"))
+        runtime_error = _runtime_failure_message(log_file, returncode)
         final_changes = {
             "status": "complete" if complete else "failed", "outputs": outputs,
-            "error": None if complete else f"渲染退出码 {returncode}，请查看日志",
+            "error": None if complete else runtime_error,
             "finished_at": int(time.time()),
         }
         try:
@@ -547,6 +548,17 @@ def _run(task_id):
                             task_id, traceback.format_exc())
     finally:
         _cleanup_render_world(world_name)
+
+
+def _runtime_failure_message(log_file, returncode):
+    """Map authoritative Java runtime failures to a user-facing reason."""
+    try:
+        log_text = Path(log_file).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        log_text = ""
+    if re.search(r"CHUNK_COVERAGE\b[^\n]*\bresult=FAIL\b", log_text):
+        return "投影超出当前实际 Chunk 加载范围，请查看日志中的失败视图和区块详情"
+    return f"渲染退出码 {returncode}，请查看日志"
 
 
 @bp.get("/tools/litematic_render/")
@@ -587,22 +599,12 @@ def upload():
         radius, camera_distance, distance = _axon_distance_metrics(dimensions)
         limit = _safe_render_distance_blocks()
         hard_limit = RENDER_DISTANCE_CHUNKS * 16
-        if distance > limit:
-            temporary.unlink(missing_ok=True)
-            return jsonify({
-                "error": "投影超出安全渲染视距",
-                "dimensions": " × ".join(map(str, dimensions)),
-                "farthest_distance": round(distance, 2),
-                "safe_limit": limit,
-                "hard_limit": hard_limit,
-                "render_distance_chunks": RENDER_DISTANCE_CHUNKS,
-                "safety_chunks": RENDER_DISTANCE_SAFETY_CHUNKS,
-            }), 413
         render_size_check = (
-            f"RENDER_PREFLIGHT dimensions={'x'.join(map(str, dimensions))} "
+            f"RENDER_PREFLIGHT_LEGACY dimensions={'x'.join(map(str, dimensions))} "
             f"radius={radius:.4f} cameraDistance={camera_distance:.4f} "
-            f"farthestCornerDistance={distance:.4f} safeLimit={limit} "
-            f"hardLimit={hard_limit} result=PASS runtimeAuthoritative=true"
+            f"axon3dDistance={distance:.4f} legacySafeLimit={limit} "
+            f"hardLimit={hard_limit} legacyResult={'OVER' if distance > limit else 'WITHIN'} "
+            f"runtimeAuthoritative=true"
         )
     with temporary.open("rb") as upload_data:
         digest = hashlib.file_digest(upload_data, "sha256").hexdigest()[:8]
