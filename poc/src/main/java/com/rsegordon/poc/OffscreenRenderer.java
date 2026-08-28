@@ -3,10 +3,12 @@ package com.rsegordon.poc;
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.regex.Pattern;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -18,6 +20,7 @@ import org.joml.Vector4f;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.server.IntegratedServer;
+import net.minecraft.server.level.ChunkTrackingView;
 import net.minecraft.client.Screenshot;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
@@ -44,9 +47,11 @@ import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.GameType;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.LevelSettings;
 import net.minecraft.world.level.WorldDataConfiguration;
 import net.minecraft.world.level.levelgen.FlatLevelSource;
@@ -73,15 +78,21 @@ public final class OffscreenRenderer {
     private static final long PAPER_DAY_TIME = 6000L;
     private static final int RENDER_DISTANCE_CHUNKS =
             Math.max(2, Integer.getInteger("litematic.render.distanceChunks", 32));
+    private static final int SERVER_VIEW_DISTANCE_CHUNKS = Math.max(2,
+            Integer.getInteger("litematic.server.viewDistanceChunks", RENDER_DISTANCE_CHUNKS));
+    private static final int RENDER_SAFETY_CHUNKS = Math.max(0,
+            Integer.getInteger("litematic.render.safetyChunks", 2));
     private static final int CAPTURE_BASE_RESOLUTION = 1536;
     private static final int CAPTURE_MAX_RESOLUTION = 2048;
     private static final double CAPTURE_LONG_VIEW_BOOST = 1.35;
     private static final int CONTENT_GUTTER_X = 36;
     private static final int CONTENT_GUTTER_Y = 48;
     private static final double LONG_VIEW_COMPACTION = 0.75;
+    private static final String RENDER_WORLD_PREFIX = "LitematicRender_";
+    private static final Pattern RENDER_WORLD_NAME = Pattern.compile(
+            RENDER_WORLD_PREFIX + "[A-Za-z0-9_-]{1,64}");
     private static Job job;
     private static boolean worldStartRequested;
-    private static int worldSettleTicks;
     private static ViewState activeView;
     private static volatile boolean paperFullbright;
     static {
@@ -141,14 +152,16 @@ public final class OffscreenRenderer {
             if (!client.isGameLoadFinished() || client.gui.overlay() != null) return;
             if (!worldStartRequested) {
                 worldStartRequested = true;
+                String worldName = configuredWorldName();
+                deleteStaleRenderWorld(worldName);
                 client.options.renderDistance().set(RENDER_DISTANCE_CHUNKS);
-                System.out.println("LITEMATIC_RENDER_STARTING_WORLD World renderDistance="
-                        + RENDER_DISTANCE_CHUNKS + " preset=the_void generator=FlatLevelSource");
+                System.out.println("RENDER_WORLD_CREATE name=" + worldName + " renderDistance="
+                        + RENDER_DISTANCE_CHUNKS + " preset=THE_VOID generator=FlatLevelSource");
                 LevelSettings levelSettings = new LevelSettings(
-                        "World", GameType.CREATIVE, LevelSettings.DifficultySettings.DEFAULT,
+                        worldName, GameType.CREATIVE, LevelSettings.DifficultySettings.DEFAULT,
                         true, WorldDataConfiguration.DEFAULT);
                 client.createWorldOpenFlows().createFreshLevel(
-                        "World",
+                        worldName,
                         levelSettings,
                         WorldOptions.defaultWithRandomSeed(),
                         registries -> {
@@ -165,14 +178,30 @@ public final class OffscreenRenderer {
             return;
         }
         try {
+            if (!job.worldValidated) {
+                job.requestWorldValidation(client);
+                return;
+            }
+            if (job.worldValidationError != null) {
+                throw new IllegalStateException(job.worldValidationError);
+            }
             if (!job.platformCleared) {
-                int range = RENDER_DISTANCE_CHUNKS * 16;
-                int blocksCleared = clearSpawnPlatform(range, Blocks.AIR.defaultBlockState(),
+                int[] dimensions = job.readModelDimensions();
+                int originX = -Math.floorDiv(dimensions[0], 2);
+                int originZ = -Math.floorDiv(dimensions[2], 2);
+                int minX = job.spawnPlatformDetected ? job.spawnPlatformMinX : originX - 16;
+                int maxX = job.spawnPlatformDetected ? job.spawnPlatformMaxX
+                        : originX + dimensions[0] - 1 + 16;
+                int minZ = job.spawnPlatformDetected ? job.spawnPlatformMinZ : originZ - 16;
+                int maxZ = job.spawnPlatformDetected ? job.spawnPlatformMaxZ
+                        : originZ + dimensions[2] - 1 + 16;
+                int platformY = job.spawnPlatformDetected ? job.spawnPlatformY : 0;
+                int blocksCleared = clearSpawnPlatform(minX, maxX, platformY, minZ, maxZ,
+                        Blocks.AIR.defaultBlockState(),
                         (pos, state) -> client.level.setBlock(pos, state, 3));
                 job.platformCleared = true;
-                int chunksWide = RENDER_DISTANCE_CHUNKS * 2 + 1;
-                System.out.println("LITEMATIC_RENDER_PLATFORM_CLEARED range=" + range
-                        + " chunks=" + (chunksWide * chunksWide)
+                System.out.println("LITEMATIC_RENDER_PLATFORM_CLEARED bounds=[" + minX + ","
+                        + platformY + "," + minZ + "]-[" + maxX + "," + platformY + "," + maxZ + "]"
                         + " blocks=" + blocksCleared);
             }
             if (client.player == null) return;
@@ -185,11 +214,7 @@ public final class OffscreenRenderer {
                 return;
             }
             if (!job.playerSecured) job.securePlayer(client);
-            // The player object appears before the initial client chunks have
-            // arrived. Writing into missing chunks silently fails and leaves
-            // block entities attached to void_air, so wait for the 32-chunk
-            // view-distance update and initial chunk packets to settle.
-            if (!job.loaded && worldSettleTicks++ < 200) return;
+            if (!job.loaded && !job.requiredChunksReady(client, "LOAD", job.initialRequiredChunks())) return;
             if (!job.loaded) { job.load(client); return; }
             job.enforceCaptureTime(client);
             job.logEntityTickDiagnostic();
@@ -201,9 +226,9 @@ public final class OffscreenRenderer {
             View view = View.values()[Math.min(job.view, View.values().length - 1)];
             if (job.prepareCaptureTarget(client, view)) return;
             activeView = job.cameraFor(view, client);
-            client.player.setPos(activeView.position.x,
-                    activeView.position.y - client.player.getEyeHeight(), activeView.position.z);
-            client.player.setYRot(view.yaw); client.player.setXRot(view.pitch);
+            if (!job.synchronizeViewPosition(client, view, activeView)) return;
+            if (!job.requiredChunksReady(client, job.capturePass + ":" + view,
+                    job.requiredChunks())) return;
             if (job.passRebuildPending) {
                 client.levelRenderer.invalidateCompiledGeometry(
                         client.level,client.options,client.gameRenderer.mainCamera(),client.getBlockColors());
@@ -237,7 +262,6 @@ public final class OffscreenRenderer {
             client.stop();
             job = null;
             activeView = null;
-            worldSettleTicks = 0;
         }
     }
 
@@ -246,12 +270,38 @@ public final class OffscreenRenderer {
         void set(BlockPos pos, BlockState state);
     }
 
-    static int clearSpawnPlatform(int range, BlockState fillState, BlockSetter setter) {
-        if (range < 0) throw new IllegalArgumentException("range must not be negative");
+    static String configuredWorldName() {
+        String worldName = System.getProperty(
+                "litematic.render.worldName", RENDER_WORLD_PREFIX + "Temporary");
+        if (!RENDER_WORLD_NAME.matcher(worldName).matches()) {
+            throw new IllegalArgumentException("Invalid temporary render world name: " + worldName);
+        }
+        return worldName;
+    }
+
+    static void deleteStaleRenderWorld(String worldName) {
+        if (!RENDER_WORLD_NAME.matcher(worldName).matches()) {
+            throw new IllegalArgumentException("Refusing to delete non-render world: " + worldName);
+        }
+        Path worldPath = Path.of("saves", worldName);
+        if (!Files.exists(worldPath)) return;
+        try (var paths = Files.walk(worldPath)) {
+            for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                Files.delete(path);
+            }
+            System.out.println("RENDER_WORLD_STALE_DELETE name=" + worldName + " result=PASS");
+        } catch (Exception error) {
+            throw new IllegalStateException("Unable to delete stale render world " + worldName, error);
+        }
+    }
+
+    static int clearSpawnPlatform(int minX, int maxX, int y, int minZ, int maxZ,
+                                  BlockState fillState, BlockSetter setter) {
+        if (minX > maxX || minZ > maxZ) throw new IllegalArgumentException("invalid platform bounds");
         int blocksCleared = 0;
-        for (int x = -range; x <= range; x++) {
-            for (int z = -range; z <= range; z++) {
-                setter.set(new BlockPos(x, 0, z), fillState);
+        for (int x = minX; x <= maxX; x++) {
+            for (int z = minZ; z <= maxZ; z++) {
+                setter.set(new BlockPos(x, y, z), fillState);
                 blocksCleared++;
             }
         }
@@ -295,10 +345,22 @@ public final class OffscreenRenderer {
 
     private record ViewState(Vec3 position, float halfSize, float farPlane) {}
 
-    private static final class Job {
+    static final class Job {
         final Path input, out; final String title; final Style style; final long renderTime, jobStarted;
         final double blueprintNightVision, blueprintGamma;
         boolean loaded, platformCleared, respawnRequested, playerSecured, screenshotPending, nightVisionApplied, passRebuildPending;
+        boolean coverageValidated;
+        volatile boolean worldValidationStarted, worldValidated;
+        volatile String worldValidationError;
+        volatile int clientRenderDistance, serverViewDistance, serverSimulationDistance,
+                effectiveViewDistance;
+        volatile String teleportRequestedKey, teleportReadyKey, teleportError;
+        volatile boolean spawnPlatformDetected;
+        volatile int spawnPlatformMinX, spawnPlatformMaxX, spawnPlatformY,
+                spawnPlatformMinZ, spawnPlatformMaxZ;
+        String chunkReadyKey;
+        String chunkReadyPassedKey;
+        long chunkReadyStarted, chunkReadyLastLog;
         boolean materialCapture, materialFrameReady;
         int materialCapturePhase, materialWait, writtenSingleViews;
         long passStarted, viewStarted, materialStarted;
@@ -327,6 +389,151 @@ public final class OffscreenRenderer {
             this.blueprintNightVision=unitDoubleProperty("litematic.render.nightvision", 1.0);
             this.blueprintGamma=positiveDoubleProperty("litematic.render.gamma", 2.5);
             this.capturePass=style.writesPaper() ? CapturePass.PAPER_COLOR : CapturePass.BLUEPRINT_EDGE;
+        }
+
+        void requestWorldValidation(Minecraft client) throws Exception {
+            if (worldValidationError != null) throw new IllegalStateException(worldValidationError);
+            if (worldValidationStarted) return;
+            worldValidationStarted = true;
+            int[] dimensions = readModelDimensions();
+            int originX = -Math.floorDiv(dimensions[0], 2);
+            int originZ = -Math.floorDiv(dimensions[2], 2);
+            int minChunkX = SectionPos.blockToSectionCoord(originX) - 1;
+            int maxChunkX = SectionPos.blockToSectionCoord(originX + dimensions[0] - 1) + 1;
+            int minChunkZ = SectionPos.blockToSectionCoord(originZ) - 1;
+            int maxChunkZ = SectionPos.blockToSectionCoord(originZ + dimensions[2] - 1) + 1;
+            IntegratedServer server = client.getSingleplayerServer();
+            if (server == null) throw new IllegalStateException("Render world has no integrated server");
+            server.execute(() -> {
+                try {
+                    var overworld = server.overworld();
+                    var generator = overworld.getChunkSource().getGenerator();
+                    boolean flat = generator instanceof FlatLevelSource;
+                    System.out.printf("VOID_WORLD_CHECK world=%s generator=%s result=%s%n",
+                            configuredWorldName(), generator.getClass().getSimpleName(), flat ? "PASS" : "FAIL");
+                    if (!flat) throw new IllegalStateException(
+                            "Render world is not THE_VOID FlatLevelSource");
+
+                    server.getPlayerList().setViewDistance(SERVER_VIEW_DISTANCE_CHUNKS);
+                    server.getPlayerList().setSimulationDistance(SERVER_VIEW_DISTANCE_CHUNKS);
+                    clientRenderDistance = client.options.renderDistance().get();
+                    serverViewDistance = server.getPlayerList().getViewDistance();
+                    serverSimulationDistance = server.getPlayerList().getSimulationDistance();
+                    effectiveViewDistance = Math.min(clientRenderDistance, serverViewDistance);
+                    System.out.printf("CHUNK_DISTANCE_CONFIG clientRender=%d serverView=%d "
+                                    + "serverSimulation=%d effectiveView=%d safety=%d%n",
+                            clientRenderDistance, serverViewDistance, serverSimulationDistance,
+                            effectiveViewDistance, RENDER_SAFETY_CHUNKS);
+
+                    int checkedChunks = 0;
+                    long nonAirTerrain = 0;
+                    int terrainMinX = Integer.MAX_VALUE, terrainMaxX = Integer.MIN_VALUE;
+                    int terrainMinY = Integer.MAX_VALUE, terrainMaxY = Integer.MIN_VALUE;
+                    int terrainMinZ = Integer.MAX_VALUE, terrainMaxZ = Integer.MIN_VALUE;
+                    for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+                        for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                            ChunkAccess chunk = overworld.getChunk(chunkX, chunkZ);
+                            checkedChunks++;
+                            for (int sectionIndex = 0; sectionIndex < chunk.getSections().length; sectionIndex++) {
+                                var section = chunk.getSections()[sectionIndex];
+                                if (section.hasOnlyAir()) continue;
+                                int sectionY = chunk.getMinY() + sectionIndex * 16;
+                                for (int localY = 0; localY < 16; localY++) {
+                                    for (int localZ = 0; localZ < 16; localZ++) {
+                                        for (int localX = 0; localX < 16; localX++) {
+                                            BlockState state = section.getBlockState(localX, localY, localZ);
+                                            if (!isOrdinaryTerrain(state)) continue;
+                                            int blockX = chunkX * 16 + localX;
+                                            int blockY = sectionY + localY;
+                                            int blockZ = chunkZ * 16 + localZ;
+                                            nonAirTerrain++;
+                                            terrainMinX = Math.min(terrainMinX, blockX);
+                                            terrainMaxX = Math.max(terrainMaxX, blockX);
+                                            terrainMinY = Math.min(terrainMinY, blockY);
+                                            terrainMaxY = Math.max(terrainMaxY, blockY);
+                                            terrainMinZ = Math.min(terrainMinZ, blockZ);
+                                            terrainMaxZ = Math.max(terrainMaxZ, blockZ);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    System.out.printf("VOID_TERRAIN_SCAN nonAir=%d bounds=[%d,%d,%d]-[%d,%d,%d]%n",
+                            nonAirTerrain, terrainMinX, terrainMinY, terrainMinZ,
+                            terrainMaxX, terrainMaxY, terrainMaxZ);
+                    if (isRecognizedVoidSpawnPlatform(nonAirTerrain,
+                            terrainMinX, terrainMaxX, terrainMinY, terrainMaxY,
+                            terrainMinZ, terrainMaxZ)) {
+                        spawnPlatformDetected = true;
+                        spawnPlatformMinX = terrainMinX;
+                        spawnPlatformMaxX = terrainMaxX;
+                        spawnPlatformY = terrainMinY;
+                        spawnPlatformMinZ = terrainMinZ;
+                        spawnPlatformMaxZ = terrainMaxZ;
+                        for (int x = terrainMinX; x <= terrainMaxX; x++) {
+                            for (int z = terrainMinZ; z <= terrainMaxZ; z++) {
+                                overworld.setBlock(new BlockPos(x, terrainMinY, z),
+                                        Blocks.AIR.defaultBlockState(), 3);
+                            }
+                        }
+                        nonAirTerrain = 0;
+                        for (int x = terrainMinX; x <= terrainMaxX; x++) {
+                            for (int z = terrainMinZ; z <= terrainMaxZ; z++) {
+                                if (!overworld.getBlockState(new BlockPos(x, terrainMinY, z)).isAir()) {
+                                    nonAirTerrain++;
+                                }
+                            }
+                        }
+                        System.out.printf("VOID_SPAWN_PLATFORM_CLEAR bounds=[%d,%d,%d]-[%d,%d,%d] "
+                                        + "result=%s%n",
+                                terrainMinX, terrainMinY, terrainMinZ,
+                                terrainMaxX, terrainMaxY, terrainMaxZ,
+                                nonAirTerrain == 0 ? "PASS" : "FAIL");
+                    }
+                    boolean clean = nonAirTerrain == 0;
+                    System.out.printf("VOID_TERRAIN_CHECK checkedChunks=%d nonAirTerrain=%d result=%s%n",
+                            checkedChunks, nonAirTerrain, clean ? "PASS" : "FAIL");
+                    if (!clean) throw new IllegalStateException(
+                            "Render world contains ordinary terrain before litematic load: " + nonAirTerrain);
+                    worldValidated = true;
+                } catch (Exception error) {
+                    worldValidationError = error.getMessage() == null
+                            ? error.getClass().getName() : error.getMessage();
+                    worldValidated = true;
+                }
+            });
+        }
+
+        int[] readModelDimensions() throws Exception {
+            CompoundTag root = NbtIo.readCompressed(input, NbtAccounter.unlimitedHeap());
+            CompoundTag regions = root.getCompoundOrEmpty("Regions");
+            if (regions.keySet().isEmpty()) throw new IllegalArgumentException("No litematic regions");
+            CompoundTag region = regions.getCompoundOrEmpty(regions.keySet().iterator().next());
+            CompoundTag size = region.getCompoundOrEmpty("Size");
+            int sx = Math.abs(size.getIntOr("x", 0));
+            int sy = Math.abs(size.getIntOr("y", 0));
+            int sz = Math.abs(size.getIntOr("z", 0));
+            if (sx == 0 || sy == 0 || sz == 0) {
+                throw new IllegalArgumentException("Litematic region has a zero dimension");
+            }
+            return new int[]{sx, sy, sz};
+        }
+
+        static boolean isOrdinaryTerrain(BlockState state) {
+            // Before job.load() a true void world has no blocks at all outside
+            // the known spawn platform. Treat every non-air state as terrain so
+            // ores, bedrock, vegetation, snow and modded blocks cannot evade the
+            // sanity check merely because they are not in a short allow-list.
+            return !state.isAir();
+        }
+
+        static boolean isRecognizedVoidSpawnPlatform(long count,
+                int minX, int maxX, int minY, int maxY, int minZ, int maxZ) {
+            if (count == 0 || minY != maxY) return false;
+            int width = maxX - minX + 1;
+            int depth = maxZ - minZ + 1;
+            return width <= 33 && depth <= 33 && count == (long)width * depth;
         }
 
         /**
@@ -394,12 +601,14 @@ public final class OffscreenRenderer {
                 throw new IllegalArgumentException("Litematic height exceeds world build height: "+sy);
             }
             int originY=Math.max(lowestSafeOriginY,Math.min(160,highestSafeOriginY));
-            minX=0; minY=originY; minZ=0; maxX=sx; maxY=originY+sy; maxZ=sz;
+            int originX=-Math.floorDiv(sx,2),originZ=-Math.floorDiv(sz,2);
+            minX=originX; minY=originY; minZ=originZ;
+            maxX=originX+sx; maxY=originY+sy; maxZ=originZ+sz;
             ListTag paletteNbt = region.getListOrEmpty("BlockStatePalette");
             List<BlockState> palette = new ArrayList<>();
             for (int i=0;i<paletteNbt.size();i++) palette.add(NbtUtils.readBlockState(BuiltInRegistries.BLOCK, paletteNbt.getCompoundOrEmpty(i)));
             long[] packed=region.getLongArray("BlockStates").orElseThrow(); int bits=Math.max(2, 32-Integer.numberOfLeadingZeros(palette.size()-1)); long mask=(1L<<bits)-1;
-            BlockPos origin=new BlockPos(0,originY,0);
+            BlockPos origin=new BlockPos(originX,originY,originZ);
             clearRenderBounds(client,origin,sx,sy,sz);
             long[] paletteCounts = new long[palette.size()];
             for (int y=0;y<sy;y++) for (int z=0;z<sz;z++) for (int x=0;x<sx;x++) {
@@ -496,6 +705,7 @@ public final class OffscreenRenderer {
             previousDayTime = client.level.getOverworldClockTime();
             client.options.renderDistance().set(RENDER_DISTANCE_CHUNKS);
             configureCapturePass(client);
+            validateAllViewCoverage(client);
             // Recreate section geometry with the safe 26.2 path. Unlike
             // resetLevelRenderData(), this waits for the occlusion graph reset
             // before the next extraction and includes newly non-empty sections.
@@ -506,6 +716,168 @@ public final class OffscreenRenderer {
                     sx,sy,sz,palette.size(),tiles.size(),entityCount,mountedEntityCount,
                     (System.nanoTime()-loadStarted)/1_000_000,
                     minX,minY,minZ,maxX,maxY,maxZ);
+        }
+
+        LinkedHashSet<ChunkPos> requiredChunks() {
+            return requiredChunks(minX, maxX, minZ, maxZ);
+        }
+
+        LinkedHashSet<ChunkPos> initialRequiredChunks() throws Exception {
+            int[] dimensions = readModelDimensions();
+            int originX = -Math.floorDiv(dimensions[0], 2);
+            int originZ = -Math.floorDiv(dimensions[2], 2);
+            return requiredChunks(originX, originX + dimensions[0],
+                    originZ, originZ + dimensions[2]);
+        }
+
+        static LinkedHashSet<ChunkPos> requiredChunks(
+                double minX, double maxX, double minZ, double maxZ) {
+            int minChunkX = SectionPos.blockToSectionCoord((int)Math.floor(minX));
+            int maxChunkX = SectionPos.blockToSectionCoord((int)Math.ceil(maxX) - 1);
+            int minChunkZ = SectionPos.blockToSectionCoord((int)Math.floor(minZ));
+            int maxChunkZ = SectionPos.blockToSectionCoord((int)Math.ceil(maxZ) - 1);
+            LinkedHashSet<ChunkPos> chunks = new LinkedHashSet<>();
+            for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+                for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                    chunks.add(new ChunkPos(chunkX, chunkZ));
+                }
+            }
+            return chunks;
+        }
+
+        static List<ChunkPos> outsideChunks(
+                Iterable<ChunkPos> required, ChunkPos cameraChunk, int viewDistance) {
+            ChunkTrackingView trackingView = ChunkTrackingView.of(cameraChunk, viewDistance);
+            List<ChunkPos> outside = new ArrayList<>();
+            for (ChunkPos chunk : required) {
+                if (!trackingView.contains(chunk)) outside.add(chunk);
+            }
+            return outside;
+        }
+
+        static List<ChunkPos> missingChunks(
+                Iterable<ChunkPos> required, java.util.function.Predicate<ChunkPos> loaded) {
+            List<ChunkPos> missing = new ArrayList<>();
+            for (ChunkPos chunk : required) {
+                if (!loaded.test(chunk)) missing.add(chunk);
+            }
+            return missing;
+        }
+
+        boolean requiredChunksReady(Minecraft client, String key,
+                                    LinkedHashSet<ChunkPos> required) {
+            long now = System.nanoTime();
+            if (!key.equals(chunkReadyKey)) {
+                chunkReadyKey = key;
+                chunkReadyPassedKey = null;
+                chunkReadyStarted = now;
+                chunkReadyLastLog = 0;
+            }
+            if (key.equals(chunkReadyPassedKey)) return true;
+            List<ChunkPos> missing = missingChunks(required,
+                    chunk -> client.level.hasChunk(chunk.x(), chunk.z()));
+            long elapsedMs = (now - chunkReadyStarted) / 1_000_000;
+            if (missing.isEmpty()) {
+                chunkReadyPassedKey = key;
+                System.out.printf("CHUNK_READY view=%s required=%d loaded=%d missing=0 "
+                                + "elapsedMs=%d result=PASS%n",
+                        key, required.size(), required.size(), elapsedMs);
+                if ("LOAD".equals(key)) {
+                    System.out.printf("LOAD_CHUNKS_READY required=%d loaded=%d result=PASS%n",
+                            required.size(), required.size());
+                }
+                return true;
+            }
+            if (elapsedMs >= 30_000) {
+                System.out.printf("CHUNK_LOAD_TIMEOUT view=%s required=%d loaded=%d missing=%d "
+                                + "chunks=%s%n",
+                        key, required.size(), required.size() - missing.size(), missing.size(),
+                        missing.stream().limit(12).toList());
+                throw new IllegalStateException("Timed out waiting for required chunks for " + key
+                        + ": missing=" + missing.size());
+            }
+            if (chunkReadyLastLog == 0 || now - chunkReadyLastLog >= 1_000_000_000L) {
+                chunkReadyLastLog = now;
+                System.out.printf("CHUNK_READY view=%s required=%d loaded=%d missing=%d "
+                                + "elapsedMs=%d result=WAIT%n",
+                        key, required.size(), required.size() - missing.size(), missing.size(), elapsedMs);
+            }
+            return false;
+        }
+
+        void validateAllViewCoverage(Minecraft client) {
+            LinkedHashSet<ChunkPos> required = requiredChunks();
+            int minChunkX = required.stream().mapToInt(ChunkPos::x).min().orElseThrow();
+            int maxChunkX = required.stream().mapToInt(ChunkPos::x).max().orElseThrow();
+            int minChunkZ = required.stream().mapToInt(ChunkPos::z).min().orElseThrow();
+            int maxChunkZ = required.stream().mapToInt(ChunkPos::z).max().orElseThrow();
+            int validatedViewDistance = Math.max(2, effectiveViewDistance - RENDER_SAFETY_CHUNKS);
+            System.out.printf(Locale.ROOT,
+                    "MODEL_BOUNDS blockBounds=[%.4f,%.4f]-[%.4f,%.4f] "
+                            + "chunkBounds=[%d,%d]-[%d,%d] requiredChunks=%d%n",
+                    minX, minZ, maxX, maxZ, minChunkX, minChunkZ, maxChunkX, maxChunkZ,
+                    required.size());
+            for (View candidate : View.values()) {
+                ViewState state = cameraFor(candidate, client);
+                ChunkPos cameraChunk = new ChunkPos(
+                        SectionPos.blockToSectionCoord((int)Math.floor(state.position.x)),
+                        SectionPos.blockToSectionCoord((int)Math.floor(state.position.z)));
+                List<ChunkPos> outside = outsideChunks(required, cameraChunk, validatedViewDistance);
+                String result = outside.isEmpty() ? "PASS" : "FAIL";
+                System.out.printf(Locale.ROOT,
+                        "CHUNK_COVERAGE view=%s camera=Vec3(%.4f,%.4f,%.4f) cameraChunk=[%d,%d] "
+                                + "viewDistance=%d required=%d inside=%d outside=%d result=%s%n",
+                        candidate, state.position.x, state.position.y, state.position.z,
+                        cameraChunk.x(), cameraChunk.z(), validatedViewDistance, required.size(),
+                        required.size() - outside.size(), outside.size(), result);
+                if (!outside.isEmpty()) {
+                    System.out.println("CHUNK_COVERAGE_OUTSIDE view=" + candidate + " chunks="
+                            + outside.stream().limit(12).toList());
+                    throw new IllegalArgumentException("Required chunks exceed real view distance for "
+                            + candidate + ": outside=" + outside.size());
+                }
+            }
+            coverageValidated = true;
+        }
+
+        boolean synchronizeViewPosition(Minecraft client, View targetView, ViewState state) {
+            if (teleportError != null) throw new IllegalStateException(teleportError);
+            String key = capturePass + ":" + targetView;
+            double playerY = state.position.y - client.player.getEyeHeight();
+            if (!key.equals(teleportRequestedKey)) {
+                teleportRequestedKey = key;
+                teleportReadyKey = null;
+                IntegratedServer server = client.getSingleplayerServer();
+                if (server == null) throw new IllegalStateException("Render world has no integrated server");
+                UUID playerId = client.player.getUUID();
+                server.execute(() -> {
+                    try {
+                        var serverPlayer = server.getPlayerList().getPlayer(playerId);
+                        if (serverPlayer == null) {
+                            throw new IllegalStateException("Integrated ServerPlayer is unavailable");
+                        }
+                        serverPlayer.teleportTo(state.position.x, playerY, state.position.z);
+                        serverPlayer.setYRot(targetView.yaw);
+                        serverPlayer.setXRot(targetView.pitch);
+                        serverPlayer.resetFallDistance();
+                        teleportReadyKey = key;
+                        System.out.printf(Locale.ROOT,
+                                "SERVER_PLAYER_TELEPORT view=%s player=(%.4f,%.4f,%.4f) "
+                                        + "camera=(%.4f,%.4f,%.4f) result=PASS%n",
+                                targetView, state.position.x, playerY, state.position.z,
+                                state.position.x, state.position.y, state.position.z);
+                    } catch (Exception error) {
+                        teleportError = error.getMessage() == null
+                                ? error.getClass().getName() : error.getMessage();
+                    }
+                });
+                return false;
+            }
+            if (!key.equals(teleportReadyKey)) return false;
+            client.player.setPos(state.position.x, playerY, state.position.z);
+            client.player.setYRot(targetView.yaw);
+            client.player.setXRot(targetView.pitch);
+            return true;
         }
 
         /** Clear every block inside the camera-visible bounds before pasting. */
@@ -1066,7 +1438,6 @@ public final class OffscreenRenderer {
                 job = null;
                 activeView = null;
                 worldStartRequested = false;
-                worldSettleTicks = 0;
         }
 
         void clearNightVision(Minecraft client) {

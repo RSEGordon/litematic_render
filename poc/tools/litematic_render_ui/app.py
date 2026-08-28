@@ -36,6 +36,7 @@ RENDER_DISTANCE_SAFETY_CHUNKS = int(
 )
 UPDATE_RETRIES = 3
 UPDATE_RETRY_DELAY = 0.5
+RENDER_WORLD_PREFIX = "LitematicRender_"
 
 LOG_TRANSLATIONS = {
     "WROTE COMPOSITE": "已生成合成图", "WROTE MATERIAL WORKBOOK": "已生成材料清单",
@@ -387,7 +388,35 @@ def _axon_farthest_corner_distance(dimensions):
 
 
 def _safe_render_distance_blocks():
+    """Conservative upload preflight only; Java runtime chunk validation is authoritative."""
     return max(1, RENDER_DISTANCE_CHUNKS - RENDER_DISTANCE_SAFETY_CHUNKS) * 16
+
+
+def _render_world_name(task_id):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", task_id):
+        raise ValueError(f"invalid render task id: {task_id!r}")
+    return f"{RENDER_WORLD_PREFIX}{task_id}"
+
+
+def _cleanup_render_world(world_name, retries=5, retry_delay=0.5):
+    """Remove exactly one task-owned render world, retrying transient file locks."""
+    if not re.fullmatch(rf"{re.escape(RENDER_WORLD_PREFIX)}[A-Za-z0-9_-]{{1,64}}", world_name):
+        raise ValueError(f"refusing to remove non-render world: {world_name!r}")
+    world_path = POC_ROOT / "run" / "saves" / world_name
+    for attempt in range(1, retries + 1):
+        try:
+            shutil.rmtree(world_path)
+            _log_status(logging.INFO, "cleaned temporary render world %s", world_path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError as error:
+            if attempt == retries:
+                _log_status(logging.WARNING,
+                            "temporary render world cleanup failed after %s attempts: %s (%s)",
+                            retries, world_path, error)
+                return False
+            time.sleep(retry_delay)
 
 
 def _test_metadata():
@@ -421,6 +450,7 @@ def _run(task_id):
     task = _task(task_id)
     if not task:
         return
+    world_name = _render_world_name(task_id)
     output = Path(task["output_dir"])
     log_file = output / "render.log"
     args = shlex.join([
@@ -439,9 +469,14 @@ def _run(task_id):
     env["JAVA_HOME"] = str(JAVA_HOME)
     env["PATH"] = f'{JAVA_HOME / "bin"}:{env.get("PATH", "")}'
     env["LITEMATIC_RENDER_STYLE"] = "both"
-    java_option = f"-Dlitematic.render.distanceChunks={RENDER_DISTANCE_CHUNKS}"
+    java_options = (
+        f"-Dlitematic.render.distanceChunks={RENDER_DISTANCE_CHUNKS}",
+        f"-Dlitematic.server.viewDistanceChunks={RENDER_DISTANCE_CHUNKS}",
+        f"-Dlitematic.render.safetyChunks={RENDER_DISTANCE_SAFETY_CHUNKS}",
+        f"-Dlitematic.render.worldName={world_name}",
+    )
     env["JAVA_TOOL_OPTIONS"] = " ".join(
-        value for value in (env.get("JAVA_TOOL_OPTIONS", ""), java_option) if value
+        value for value in (env.get("JAVA_TOOL_OPTIONS", ""), *java_options) if value
     )
     try:
         # The Fabric client shares its run directory/world, so render jobs must
@@ -510,6 +545,8 @@ def _run(task_id):
                 traceback.print_exc()
                 _log_status(logging.CRITICAL, "[%s] force failure update failed\n%s",
                             task_id, traceback.format_exc())
+    finally:
+        _cleanup_render_world(world_name)
 
 
 @bp.get("/tools/litematic_render/")
@@ -562,10 +599,10 @@ def upload():
                 "safety_chunks": RENDER_DISTANCE_SAFETY_CHUNKS,
             }), 413
         render_size_check = (
-            f"RENDER_SIZE_CHECK dimensions={'x'.join(map(str, dimensions))} "
+            f"RENDER_PREFLIGHT dimensions={'x'.join(map(str, dimensions))} "
             f"radius={radius:.4f} cameraDistance={camera_distance:.4f} "
             f"farthestCornerDistance={distance:.4f} safeLimit={limit} "
-            f"hardLimit={hard_limit} result=PASS"
+            f"hardLimit={hard_limit} result=PASS runtimeAuthoritative=true"
         )
     with temporary.open("rb") as upload_data:
         digest = hashlib.file_digest(upload_data, "sha256").hexdigest()[:8]
