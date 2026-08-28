@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.stream.IntStream;
 import java.util.zip.ZipFile;
 import org.junit.jupiter.api.Test;
 
@@ -57,6 +58,28 @@ class MaterialWorkbookWriterTest {
             String styles = new String(actual.getInputStream(actual.getEntry("xl/styles.xml")).readAllBytes(), StandardCharsets.UTF_8);
             assertEquals(2, styles.split("horizontal=\"left\"", -1).length - 1);
             assertTrue(styles.contains("<alignment horizontal=\"left\" vertical=\"center\" textRotation=\"0\""));
+        }
+    }
+
+    @Test
+    void writesAll214MaterialRows() throws Exception {
+        Path directory = Files.createTempDirectory("v133-workbook-");
+        List<MaterialWorkbookWriter.Row> materials = IntStream.rangeClosed(1, 214)
+                .mapToObj(number -> new MaterialWorkbookWriter.Row("材料 " + number, number * 64L))
+                .toList();
+
+        Path workbook = MaterialWorkbookWriter.write(directory, "新年小镇.litematic", materials);
+
+        try (ZipFile actual = new ZipFile(workbook.toFile())) {
+            String sheet = new String(actual.getInputStream(actual.getEntry("xl/worksheets/sheet1.xml")).readAllBytes(),
+                    StandardCharsets.UTF_8);
+            long populatedRows = IntStream.rangeClosed(2, 215)
+                    .filter(row -> sheet.contains("<c r=\"A" + row
+                            + "\" s=\"10\" t=\"inlineStr\"><is><t xml:space=\"preserve\">材料 "))
+                    .count();
+            assertEquals(214, populatedRows);
+            assertTrue(sheet.contains("<c r=\"A215\" s=\"10\" t=\"inlineStr\"><is><t xml:space=\"preserve\">材料 214</t></is></c>"));
+            assertTrue(sheet.contains("<c r=\"A216\" s=\"22\" t=\"s\"></c>"));
         }
     }
 }

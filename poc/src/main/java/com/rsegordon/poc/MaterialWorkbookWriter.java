@@ -26,7 +26,6 @@ final class MaterialWorkbookWriter {
     private MaterialWorkbookWriter() {}
 
     static Path write(Path outputDirectory, String projectName, List<Row> materials) throws IOException {
-        if (materials.size() > 75) throw new IOException("Owner workbook supports at most 75 material rows");
         if (!Files.isRegularFile(OWNER_TEMPLATE)) throw new IOException("Owner workbook template not found: " + OWNER_TEMPLATE);
         Files.createDirectories(outputDirectory);
         Path output = outputDirectory.resolve(safeName(projectName) + "_备货清单.xlsx");
@@ -83,7 +82,7 @@ final class MaterialWorkbookWriter {
         while (matcher.find()) {
             int number = Integer.parseInt(matcher.group(1));
             String row = matcher.group();
-            if (number >= 2 && number <= 76) {
+            if (number >= 2 && number <= 700) {
                 found = true;
                 Row material = number - 2 < materials.size() ? materials.get(number - 2) : null;
                 row = fillMaterialRow(row, number, material);
