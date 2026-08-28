@@ -346,7 +346,30 @@ public final class OffscreenRenderer {
         PAPER_COLOR, BLUEPRINT_EDGE
     }
 
-    private record ViewState(Vec3 position, float halfSize, float farPlane) {}
+    private record ViewState(Vec3 position, Vec3 forward, Vec3 right, Vec3 up,
+                             float halfSize, float farPlane,
+                             double projectedWorldWidth, double projectedWorldHeight) {}
+
+    record ProjectedSpan(double width, double height) {}
+
+    static ProjectedSpan projectedSpan(double minX, double minY, double minZ,
+                                       double maxX, double maxY, double maxZ,
+                                       float yawDegrees, float pitchDegrees) {
+        Vec3 center=new Vec3((minX+maxX)/2.0,(minY+maxY)/2.0,(minZ+maxZ)/2.0);
+        double yaw=Math.toRadians(yawDegrees), pitch=Math.toRadians(pitchDegrees);
+        Vec3 forward=new Vec3(-Math.sin(yaw)*Math.cos(pitch),-Math.sin(pitch),
+                Math.cos(yaw)*Math.cos(pitch));
+        Vec3 right=new Vec3(Math.cos(yaw),0,Math.sin(yaw)).normalize();
+        Vec3 up=forward.cross(right).normalize();
+        double horizontalHalfExtent=0, verticalHalfExtent=0;
+        for (double x : new double[]{minX,maxX}) for (double y : new double[]{minY,maxY})
+            for (double z : new double[]{minZ,maxZ}) {
+                Vec3 delta=new Vec3(x,y,z).subtract(center);
+                horizontalHalfExtent=Math.max(horizontalHalfExtent,Math.abs(delta.dot(right)));
+                verticalHalfExtent=Math.max(verticalHalfExtent,Math.abs(delta.dot(up)));
+            }
+        return new ProjectedSpan(horizontalHalfExtent*2.0,verticalHalfExtent*2.0);
+    }
 
     static final class Job {
         final Path input, out; final String title; final Style style; final long renderTime, jobStarted;
@@ -388,6 +411,8 @@ public final class OffscreenRenderer {
         final float[] principalHalfSizes = new float[View.values().length];
         final int[] principalCaptureWidths = new int[View.values().length];
         final int[] principalCaptureHeights = new int[View.values().length];
+        final double[] principalProjectedWidths = new double[View.values().length];
+        final double[] principalProjectedHeights = new double[View.values().length];
         final Map<View,int[]> paperPrincipalRects = new HashMap<>();
         final Map<View,int[]> blueprintPrincipalRects = new HashMap<>();
         Job(Path input, Path out, String title) {
@@ -1028,12 +1053,15 @@ public final class OffscreenRenderer {
             double distance=Math.max(radius*1.05,radius+0.5);
             Vec3 position=center.subtract(forward.scale(distance));
             float farPlane=(float)Math.max(256.0,distance+radius+32.0);
-            ViewState state=new ViewState(position,halfSize,farPlane);
+            ViewState state=new ViewState(position,forward,right,up,halfSize,farPlane,
+                    horizontal*2.0,vertical*2.0);
             System.out.printf(Locale.ROOT,
                     "CAMERA_VIEW view=%s center=Vec3(%.4f,%.4f,%.4f) position=Vec3(%.4f,%.4f,%.4f) "
-                            + "radius=%.4f distance=%.4f halfSize=%.4f farPlane=%.4f elapsed=%dms%n",
+                            + "radius=%.4f distance=%.4f halfSize=%.4f farPlane=%.4f "
+                            + "projectedWorld=%.4fx%.4f elapsed=%dms%n",
                     view,center.x,center.y,center.z,state.position.x,state.position.y,state.position.z,
                     radius,distance,state.halfSize,state.farPlane,
+                    state.projectedWorldWidth,state.projectedWorldHeight,
                     (System.nanoTime() - jobStarted) / 1_000_000);
             if (!isPrincipalView(view)) {
                 double farthestCornerDistance=0.0;
@@ -1222,6 +1250,8 @@ public final class OffscreenRenderer {
                 principalHalfSizes[captureView.ordinal()] = activeView.halfSize();
                 principalCaptureWidths[captureView.ordinal()] = client.gameRenderer.mainRenderTarget().width;
                 principalCaptureHeights[captureView.ordinal()] = client.gameRenderer.mainRenderTarget().height;
+                principalProjectedWidths[captureView.ordinal()] = activeView.projectedWorldWidth();
+                principalProjectedHeights[captureView.ordinal()] = activeView.projectedWorldHeight();
             }
             if (capturePass == CapturePass.PAPER_COLOR && isPrincipalView(captureView)) {
                 long captureNanos=System.nanoTime();
@@ -1628,8 +1658,7 @@ public final class OffscreenRenderer {
                 if (slot==null) continue;
                 BufferedImage source=viewsFor(outputStyle)[slot.ordinal()];
                 if (isPrincipalView(slot)) {
-                    PrincipalProjectionFrame frame=principalProjectionFrame(
-                            slot,source,sizeX,sizeY,sizeZ,principalScale);
+                    PrincipalProjectionFrame frame=principalProjectionFrame(slot,source,principalScale);
                     principalFrames[row][column]=frame;
                     columnWidths[column]=Math.max(columnWidths[column],frame.sheetWidth());
                     rowHeights[row]=Math.max(rowHeights[row],frame.sheetHeight());
@@ -1731,12 +1760,9 @@ public final class OffscreenRenderer {
         }
 
         private void logPrincipalViewSizes(double sizeX,double sizeY,double sizeZ,double pixelsPerBlock) {
-            logPrincipalViewSize(View.FRONT_X_POS,sizeX,sizeY,pixelsPerBlock);
-            logPrincipalViewSize(View.BACK_X_NEG,sizeX,sizeY,pixelsPerBlock);
-            logPrincipalViewSize(View.LEFT_Z_NEG,sizeZ,sizeY,pixelsPerBlock);
-            logPrincipalViewSize(View.RIGHT_Z_POS,sizeZ,sizeY,pixelsPerBlock);
-            logPrincipalViewSize(View.TOP_X_UP,sizeX,sizeZ,pixelsPerBlock);
-            logPrincipalViewSize(View.BOTTOM_X_UP,sizeX,sizeZ,pixelsPerBlock);
+            for (View view : View.values()) if (isPrincipalView(view))
+                logPrincipalViewSize(view,principalProjectedWidths[view.ordinal()],
+                        principalProjectedHeights[view.ordinal()],pixelsPerBlock);
         }
 
         private record PrincipalProjectionFrame(View view,double worldHorizontal,double worldVertical,
@@ -1751,9 +1777,19 @@ public final class OffscreenRenderer {
         }
 
         private PrincipalProjectionFrame principalProjectionFrame(View view,BufferedImage source,
-                double sizeX,double sizeY,double sizeZ,double principalScale) {
-            double worldWidth=(view==View.LEFT_Z_NEG || view==View.RIGHT_Z_POS)?sizeZ:sizeX;
-            double worldHeight=(view==View.TOP_X_UP || view==View.BOTTOM_X_UP)?sizeZ:sizeY;
+                double principalScale) {
+            double worldWidth=principalProjectedWidths[view.ordinal()];
+            double worldHeight=principalProjectedHeights[view.ordinal()];
+            ProjectedSpan basisSpan=projectedSpan(minX,minY,minZ,maxX,maxY,maxZ,view.yaw,view.pitch);
+            boolean cameraFrameMatches=Math.abs(worldWidth-basisSpan.width())<1.0e-6
+                    && Math.abs(worldHeight-basisSpan.height())<1.0e-6;
+            System.out.printf(Locale.ROOT,
+                    "PRINCIPAL_CAMERA_FRAME_CHECK view=%s cameraProjected=%.4fx%.4f "
+                            + "frameWorld=%.4fx%.4f result=%s%n",
+                    view,basisSpan.width(),basisSpan.height(),worldWidth,worldHeight,
+                    cameraFrameMatches?"PASS":"FAIL");
+            if (!cameraFrameMatches)
+                throw new IllegalStateException("Principal camera/frame mismatch for "+view);
             float halfSize=principalHalfSizes[view.ordinal()];
             int capturedWidth=principalCaptureWidths[view.ordinal()];
             int capturedHeight=principalCaptureHeights[view.ordinal()];
@@ -1766,8 +1802,10 @@ public final class OffscreenRenderer {
                     (int)Math.round(worldWidth*capturePixelsPerBlock)));
             int cropHeight=Math.max(1,Math.min(source.getHeight(),
                     (int)Math.round(worldHeight*capturePixelsPerBlock)));
-            int cropX=Math.max(0,(source.getWidth()-cropWidth)/2);
-            int cropY=Math.max(0,(source.getHeight()-cropHeight)/2);
+            int cropX=Math.max(0,Math.min(source.getWidth()-cropWidth,
+                    (int)Math.round(source.getWidth()/2.0-cropWidth/2.0)));
+            int cropY=Math.max(0,Math.min(source.getHeight()-cropHeight,
+                    (int)Math.round(source.getHeight()/2.0-cropHeight/2.0)));
             int drawWidth=Math.max(1,(int)Math.round(worldWidth*principalScale));
             int drawHeight=Math.max(1,(int)Math.round(worldHeight*principalScale));
             return new PrincipalProjectionFrame(view,worldWidth,worldHeight,cropX,cropY,cropWidth,
@@ -1817,18 +1855,18 @@ public final class OffscreenRenderer {
                     && withinPixel(left.sheetHeight(),front.sheetHeight())
                     && withinPixel(front.sheetHeight(),right.sheetHeight())
                     && withinPixel(right.sheetHeight(),back.sheetHeight());
-            boolean xSpan=withinPixel(front.sheetWidth(),back.sheetWidth())
+            boolean zSpan=withinPixel(front.sheetWidth(),back.sheetWidth())
                     && withinPixel(front.sheetWidth(),top.sheetWidth())
                     && withinPixel(front.sheetWidth(),bottom.sheetWidth());
-            boolean zSpan=withinPixel(left.sheetWidth(),right.sheetWidth())
+            boolean xSpan=withinPixel(left.sheetWidth(),right.sheetWidth())
                     && withinPixel(left.sheetWidth(),top.sheetHeight())
                     && withinPixel(left.sheetWidth(),bottom.sheetHeight());
-            System.out.printf("PRINCIPAL_ALIGNMENT_CHECK style=%s height=%s xSpan=%s zSpan=%s result=%s%n",
-                    style,height?"PASS":"FAIL",xSpan?"PASS":"FAIL",zSpan?"PASS":"FAIL",
+            System.out.printf("PRINCIPAL_ALIGNMENT_CHECK style=%s yHeight=%s zSpan=%s xSpan=%s result=%s%n",
+                    style,height?"PASS":"FAIL",zSpan?"PASS":"FAIL",xSpan?"PASS":"FAIL",
                     height&&xSpan&&zSpan?"PASS":"FAIL");
-            if (!height) System.out.println("PRINCIPAL_ALIGNMENT_FAIL type=HEIGHT");
-            if (!xSpan) System.out.println("PRINCIPAL_ALIGNMENT_FAIL type=X_SPAN");
+            if (!height) System.out.println("PRINCIPAL_ALIGNMENT_FAIL type=Y_HEIGHT_ALIGNMENT");
             if (!zSpan) System.out.println("PRINCIPAL_ALIGNMENT_FAIL type=Z_SPAN");
+            if (!xSpan) System.out.println("PRINCIPAL_ALIGNMENT_FAIL type=X_SPAN");
             if (!(height&&xSpan&&zSpan)) throw new IllegalStateException("Principal engineering alignment failed");
         }
 
