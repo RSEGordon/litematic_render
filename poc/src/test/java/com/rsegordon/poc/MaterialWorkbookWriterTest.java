@@ -14,7 +14,7 @@ import org.junit.jupiter.api.Test;
 
 class MaterialWorkbookWriterTest {
     private static final Path TEMPLATE = Path.of(
-            "/home/rsegordon/.hermes/cache/documents/doc_2079455ba095_刷怪塔材料清单.xlsx");
+            "/home/rsegordon/.hermes/cache/documents/doc_eebd8c239945_刷怪塔材料清单.xlsx");
 
     @Test
     void usesOwnerWorkbookAndOnlyFillsMaterialCells() throws Exception {
