@@ -2,7 +2,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 from flask import Flask
@@ -38,6 +37,12 @@ class RenderStateRecoveryTest(unittest.TestCase):
         for name in ("demo_overview_paper.png", "demo_overview.png", "demo_备货清单.xlsx"):
             (self.output / name).write_bytes(b"output")
 
+    @staticmethod
+    def _completed_process(returncode=0):
+        process = mock.Mock()
+        process.wait.return_value = returncode
+        return process
+
     def test_update_retries_then_succeeds_and_logs_traceback(self):
         original = render_app._write_tasks
         calls = 0
@@ -68,7 +73,8 @@ class RenderStateRecoveryTest(unittest.TestCase):
             raise RuntimeError("simulated final update failure")
 
         with mock.patch.object(render_app, "_update", side_effect=fail_final_update), \
-                mock.patch.object(render_app.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
+                mock.patch.object(render_app.subprocess, "Popen",
+                                  return_value=self._completed_process()):
             render_app._run("v128")
 
         saved = render_app._task("v128")
@@ -77,7 +83,8 @@ class RenderStateRecoveryTest(unittest.TestCase):
         self.assertEqual(saved["outputs"]["paper"], "demo_overview_paper.png")
 
     def test_run_exception_marks_task_failed(self):
-        with mock.patch.object(render_app.subprocess, "run", side_effect=RuntimeError("renderer crashed")):
+        with mock.patch.object(render_app.subprocess, "Popen",
+                              side_effect=RuntimeError("renderer crashed")):
             render_app._run("v128")
 
         saved = render_app._task("v128")

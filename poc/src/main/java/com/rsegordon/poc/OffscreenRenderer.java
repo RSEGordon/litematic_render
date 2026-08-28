@@ -64,8 +64,8 @@ import java.awt.image.Kernel;
 public final class OffscreenRenderer {
     private static final java.awt.Color BLUEPRINT_LINE = java.awt.Color.WHITE;
     private static final long PAPER_DAY_TIME = 6000L;
-    /** 32 chunks covers a 100-block structure plus the most distant axonometric camera. */
-    private static final int RENDER_DISTANCE_CHUNKS = 32;
+    private static final int RENDER_DISTANCE_CHUNKS =
+            Math.max(2, Integer.getInteger("litematic.render.distanceChunks", 32));
     private static final int CAPTURE_BASE_RESOLUTION = 1536;
     private static final int CAPTURE_MAX_RESOLUTION = 2048;
     private static final double CAPTURE_LONG_VIEW_BOOST = 1.35;
@@ -338,9 +338,12 @@ public final class OffscreenRenderer {
             int sx=Math.abs(sizeX),sy=Math.abs(sizeY),sz=Math.abs(sizeZ);
             captureWidth=client.gameRenderer.mainRenderTarget().width;
             captureHeight=client.gameRenderer.mainRenderTarget().height;
-            // Keep the render volume above normal terrain while retaining at
-            // least 32 blocks of headroom inside the build-height limit.
-            int originY=Math.max(160,client.level.getMaxY()-sy-64);
+            int lowestSafeOriginY=client.level.getMinY();
+            int highestSafeOriginY=client.level.getMaxY()-sy;
+            if (highestSafeOriginY<lowestSafeOriginY) {
+                throw new IllegalArgumentException("Litematic height exceeds world build height: "+sy);
+            }
+            int originY=Math.max(lowestSafeOriginY,Math.min(160,highestSafeOriginY));
             minX=0; minY=originY; minZ=0; maxX=sx; maxY=originY+sy; maxZ=sz;
             ListTag paletteNbt = region.getListOrEmpty("BlockStatePalette");
             List<BlockState> palette = new ArrayList<>();
@@ -596,6 +599,18 @@ public final class OffscreenRenderer {
                     view,center.x,center.y,center.z,state.position.x,state.position.y,state.position.z,
                     radius,distance,state.halfSize,state.farPlane,
                     (System.nanoTime() - jobStarted) / 1_000_000);
+            if (!isPrincipalView(view)) {
+                double farthestCornerDistance=0.0;
+                for (double x : new double[]{minX,maxX}) for (double y : new double[]{minY,maxY})
+                    for (double z : new double[]{minZ,maxZ}) {
+                        farthestCornerDistance=Math.max(farthestCornerDistance,
+                                new Vec3(x,y,z).distanceTo(position));
+                    }
+                System.out.printf(Locale.ROOT,
+                        "AXON_DISTANCE_CHECK view=%s radius=%.4f cameraDistance=%.4f "
+                                + "farthestCornerDistance=%.4f renderDistanceBlocks=%d%n",
+                        view,radius,distance,farthestCornerDistance,RENDER_DISTANCE_CHUNKS*16);
+            }
             return state;
         }
 

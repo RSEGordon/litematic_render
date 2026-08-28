@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
+import math
 import os
 import re
 import shlex
@@ -29,7 +30,10 @@ _lock = threading.RLock()
 _render_lock = threading.Lock()
 _task_processes = {}  # V129: task_id -> (python_thread, java_popen) for kill-on-delete
 bp = Blueprint("litematic_render", __name__, template_folder="templates")
-MAX_RENDER_DIMENSION = 80
+RENDER_DISTANCE_CHUNKS = int(os.environ.get("LITEMATIC_RENDER_DISTANCE_CHUNKS", "32"))
+RENDER_DISTANCE_SAFETY_CHUNKS = int(
+    os.environ.get("LITEMATIC_RENDER_DISTANCE_SAFETY_CHUNKS", "2")
+)
 UPDATE_RETRIES = 3
 UPDATE_RETRY_DELAY = 0.5
 
@@ -344,6 +348,48 @@ def _metadata_dimensions(metadata):
     return tuple(map(int, dimensions.groups())) if dimensions else None
 
 
+def _read_render_dimensions(path):
+    """Read the exact first-region bounds used by OffscreenRenderer.load()."""
+    try:
+        root = _read_nbt(path)
+        regions = root.get("Regions", {})
+        if not regions:
+            raise ValueError("No litematic regions")
+        region = regions[next(iter(regions))]
+        size = region.get("Size", {})
+        dimensions = tuple(abs(int(size.get(axis, 0))) for axis in ("x", "y", "z"))
+        if not all(dimensions):
+            raise ValueError("Region Size missing or zero")
+        return dimensions
+    except (OSError, EOFError, KeyError, StopIteration, ValueError, TypeError) as error:
+        print(f"[V132 render bounds] {path}: {type(error).__name__}: {error}", file=sys.stderr)
+        return None
+
+
+def _axon_distance_metrics(dimensions):
+    """Calculate the V131 axonometric camera metrics for rectangular bounds."""
+    a, b, c = (dimension / 2.0 for dimension in dimensions)
+    radius = math.sqrt(a * a + b * b + c * c)
+    camera_distance = max(radius * 1.05, radius + 0.5)
+    xz_component = math.sqrt(6.0) / 4.0
+    depth_extent = xz_component * a + 0.5 * b + xz_component * c
+    farthest_distance = math.sqrt(
+        camera_distance * camera_distance
+        + radius * radius
+        + 2.0 * camera_distance * depth_extent
+    )
+    return radius, camera_distance, farthest_distance
+
+
+def _axon_farthest_corner_distance(dimensions):
+    """Return Camera -> farthest corner distance using the V131 camera formula."""
+    return _axon_distance_metrics(dimensions)[2]
+
+
+def _safe_render_distance_blocks():
+    return max(1, RENDER_DISTANCE_CHUNKS - RENDER_DISTANCE_SAFETY_CHUNKS) * 16
+
+
 def _test_metadata():
     """Smoke-test all reported schematics, including the former EOF case."""
     samples = (
@@ -393,12 +439,19 @@ def _run(task_id):
     env["JAVA_HOME"] = str(JAVA_HOME)
     env["PATH"] = f'{JAVA_HOME / "bin"}:{env.get("PATH", "")}'
     env["LITEMATIC_RENDER_STYLE"] = "both"
+    java_option = f"-Dlitematic.render.distanceChunks={RENDER_DISTANCE_CHUNKS}"
+    env["JAVA_TOOL_OPTIONS"] = " ".join(
+        value for value in (env.get("JAVA_TOOL_OPTIONS", ""), java_option) if value
+    )
     try:
         # The Fabric client shares its run directory/world, so render jobs must
         # be serialized even if several browser uploads arrive together.
         with _render_lock, log_file.open("w", encoding="utf-8") as log:
             _update(task_id, status="rendering", started_at=int(time.time()))
             _log_status(logging.INFO, "[%s] rendering started", task_id)
+            if task.get("render_size_check"):
+                log.write(task["render_size_check"] + "\n")
+                log.flush()
             # V129: 用 Popen 而非 run, 以便 delete_task 能 kill
             process = subprocess.Popen(command, cwd=POC_ROOT, env=env, stdout=log,
                                        stderr=subprocess.STDOUT, start_new_session=True)
@@ -491,15 +544,29 @@ def upload():
     temporary = RAW_DIR / f".{task_id}.upload"
     uploaded.save(temporary)
     metadata = _read_litematic_metadata(temporary)
-    dimensions = _metadata_dimensions(metadata)
-    if dimensions and max(dimensions) > MAX_RENDER_DIMENSION:
-        temporary.unlink(missing_ok=True)
-        largest = max(dimensions)
-        return jsonify({
-            "error": f"投影过大无法渲染 (最大边 {largest} > {MAX_RENDER_DIMENSION} 块)",
-            "dimensions": metadata["dimensions"],
-            "limit": MAX_RENDER_DIMENSION,
-        }), 413
+    dimensions = _read_render_dimensions(temporary)
+    render_size_check = None
+    if dimensions:
+        radius, camera_distance, distance = _axon_distance_metrics(dimensions)
+        limit = _safe_render_distance_blocks()
+        hard_limit = RENDER_DISTANCE_CHUNKS * 16
+        if distance > limit:
+            temporary.unlink(missing_ok=True)
+            return jsonify({
+                "error": "投影超出安全渲染视距",
+                "dimensions": " × ".join(map(str, dimensions)),
+                "farthest_distance": round(distance, 2),
+                "safe_limit": limit,
+                "hard_limit": hard_limit,
+                "render_distance_chunks": RENDER_DISTANCE_CHUNKS,
+                "safety_chunks": RENDER_DISTANCE_SAFETY_CHUNKS,
+            }), 413
+        render_size_check = (
+            f"RENDER_SIZE_CHECK dimensions={'x'.join(map(str, dimensions))} "
+            f"radius={radius:.4f} cameraDistance={camera_distance:.4f} "
+            f"farthestCornerDistance={distance:.4f} safeLimit={limit} "
+            f"hardLimit={hard_limit} result=PASS"
+        )
     with temporary.open("rb") as upload_data:
         digest = hashlib.file_digest(upload_data, "sha256").hexdigest()[:8]
     with _lock:
@@ -519,6 +586,8 @@ def upload():
         "source_path": str(source), "output_dir": str(output), "size": source.stat().st_size,
         "status": "queued", "created_at": int(time.time()), "outputs": {},
     }
+    if render_size_check:
+        task["render_size_check"] = render_size_check
     with _lock:
         tasks = _read_tasks()
         tasks.append(task)
