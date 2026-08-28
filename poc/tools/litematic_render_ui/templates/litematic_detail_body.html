@@ -266,8 +266,11 @@
         var state=results[0],log=results[1];
         task.status=state.status;task.outputs=state.outputs||{};
         var progress=log.progress===undefined?(state.progress||0):log.progress;
+        // 限制 0-100 防 render.log 解析抖动导致进度条反复跳
+        progress=Math.max(0,Math.min(100,progress));
         progressFill.style.width=progress+'%';
-        progressText.textContent=(log.step||'渲染中')+' '+progress+'%';
+        // step 字符串空时只显示百分比,避免进度条文字反复跳
+        progressText.textContent=log.step?(log.step+' '+progress+'%'):('渲染中 '+progress+'%');
         if(log.lines&&log.lines.length){logContent.textContent=log.lines.join('\n');renderLog.scrollTop=renderLog.scrollHeight}
         if(state.status==='complete'){
           polling=false;

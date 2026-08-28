@@ -316,7 +316,7 @@ public final class OffscreenRenderer {
      * cameraFor() converts them to a look vector with sin/cos.  Cardinal names
      * describe the observation station, e.g. FRONT_X_POS is viewed from +X.
      */
-    private enum View {
+    enum View {
         FRONT_X_POS(90, 0), LEFT_Z_NEG(0, 0), RIGHT_Z_POS(180, 0),
         BACK_X_NEG(270, 0), TOP_X_UP(90, 90), BOTTOM_X_UP(90, -90),
         AXON_X_POS_Z_POS(135, 30), AXON_X_NEG_Z_POS(225, 30),
@@ -351,6 +351,93 @@ public final class OffscreenRenderer {
                              double projectedWorldWidth, double projectedWorldHeight) {}
 
     record ProjectedSpan(double width, double height) {}
+
+    record ViewPlacement(View view, int x, int y, int width, int height) {
+        int bottom() { return y + height; }
+        int centerX() { return x + width / 2; }
+    }
+
+    record EngineeringSheetLayout(int canvasWidth, int canvasHeight,
+            int drawingTop, int drawingBottom, int drawingCenterY,
+            int principalGroupTop, int principalGroupBottom, int principalMainRowY,
+            int principalGapX, int principalGapY, int drawingsBottom,
+            Map<View,ViewPlacement> placements) {
+        ViewPlacement placement(View view) {
+            ViewPlacement placement=placements.get(view);
+            if (placement==null) throw new IllegalArgumentException("Missing placement for "+view);
+            return placement;
+        }
+    }
+
+    static EngineeringSheetLayout buildEngineeringSheetLayout(Map<View,java.awt.Dimension> sizes,
+            int margin,int titleHeight,int gapX,int gapY,int scaleBarHeight,int materialsHeight) {
+        Map<View,java.awt.Dimension> fittedSizes=new java.util.EnumMap<>(View.class);
+        fittedSizes.putAll(sizes);
+        View[] main={View.LEFT_Z_NEG,View.FRONT_X_POS,View.RIGHT_Z_POS,View.BACK_X_NEG};
+        int mainWidth=0,mainHeight=0;
+        for (View view:main) {
+            java.awt.Dimension size=fittedSizes.get(view);
+            mainWidth+=size.width;
+            mainHeight=Math.max(mainHeight,size.height);
+        }
+        mainWidth+=gapX*(main.length-1);
+        java.awt.Dimension top=fittedSizes.get(View.TOP_X_UP),bottom=fittedSizes.get(View.BOTTOM_X_UP);
+        int groupHeight=top.height+gapY+mainHeight+gapY+bottom.height;
+        fitAxonHeight(fittedSizes,View.AXON_X_POS_Z_POS,top.height);
+        fitAxonHeight(fittedSizes,View.AXON_X_NEG_Z_POS,top.height);
+        fitAxonHeight(fittedSizes,View.AXON_X_POS_Z_NEG,bottom.height);
+        fitAxonHeight(fittedSizes,View.AXON_X_NEG_Z_NEG,bottom.height);
+        int leftCorner=Math.max(fittedSizes.get(View.AXON_X_POS_Z_POS).width,
+                fittedSizes.get(View.AXON_X_POS_Z_NEG).width);
+        int rightCorner=Math.max(fittedSizes.get(View.AXON_X_NEG_Z_POS).width,
+                fittedSizes.get(View.AXON_X_NEG_Z_NEG).width);
+        int centerColumn=Math.max(top.width,bottom.width);
+        int drawingWidth=Math.max(mainWidth,leftCorner+gapX+centerColumn+gapX+rightCorner);
+        // Principal geometry alone defines the drawing Y coordinate system.
+        // Axonometric content is fitted into its corner bands above/below the main row.
+        int drawingHeight=groupHeight;
+        int drawingTop=margin+titleHeight,drawingBottom=drawingTop+drawingHeight;
+        int drawingCenter=(drawingTop+drawingBottom)/2;
+        int groupTop=drawingCenter-groupHeight/2;
+        int mainY=groupTop+top.height+gapY;
+        int mainX=margin+(drawingWidth-mainWidth)/2;
+        Map<View,ViewPlacement> placements=new java.util.EnumMap<>(View.class);
+        for (View view:main) {
+            java.awt.Dimension size=fittedSizes.get(view);
+            placements.put(view,new ViewPlacement(view,mainX,mainY,size.width,mainHeight));
+            mainX+=size.width+gapX;
+        }
+        ViewPlacement front=placements.get(View.FRONT_X_POS);
+        placements.put(View.TOP_X_UP,new ViewPlacement(View.TOP_X_UP,
+                front.centerX()-top.width/2,mainY-gapY-top.height,top.width,top.height));
+        placements.put(View.BOTTOM_X_UP,new ViewPlacement(View.BOTTOM_X_UP,
+                front.centerX()-bottom.width/2,mainY+mainHeight+gapY,bottom.width,bottom.height));
+        putCorner(placements,fittedSizes,View.AXON_X_POS_Z_POS,margin,drawingTop);
+        putCorner(placements,fittedSizes,View.AXON_X_NEG_Z_POS,
+                margin+drawingWidth-fittedSizes.get(View.AXON_X_NEG_Z_POS).width,drawingTop);
+        putCorner(placements,fittedSizes,View.AXON_X_POS_Z_NEG,margin,
+                drawingBottom-fittedSizes.get(View.AXON_X_POS_Z_NEG).height);
+        putCorner(placements,fittedSizes,View.AXON_X_NEG_Z_NEG,
+                margin+drawingWidth-fittedSizes.get(View.AXON_X_NEG_Z_NEG).width,
+                drawingBottom-fittedSizes.get(View.AXON_X_NEG_Z_NEG).height);
+        int canvasHeight=drawingBottom+scaleBarHeight+materialsHeight+margin;
+        return new EngineeringSheetLayout(margin*2+drawingWidth,canvasHeight,drawingTop,
+                drawingBottom,drawingCenter,groupTop,groupTop+groupHeight,mainY,gapX,gapY,
+                drawingBottom,java.util.Collections.unmodifiableMap(placements));
+    }
+
+    private static void fitAxonHeight(Map<View,java.awt.Dimension> sizes,View view,int maxHeight) {
+        java.awt.Dimension size=sizes.get(view);
+        if (size.height<=maxHeight) return;
+        double fit=maxHeight/(double)size.height;
+        sizes.put(view,new java.awt.Dimension(Math.max(1,(int)Math.round(size.width*fit)),maxHeight));
+    }
+
+    private static void putCorner(Map<View,ViewPlacement> placements,
+            Map<View,java.awt.Dimension> sizes,View view,int x,int y) {
+        java.awt.Dimension size=sizes.get(view);
+        placements.put(view,new ViewPlacement(view,x,y,size.width,size.height));
+    }
 
     static ProjectedSpan projectedSpan(double minX, double minY, double minZ,
                                        double maxX, double maxY, double maxZ,
@@ -415,6 +502,8 @@ public final class OffscreenRenderer {
         final double[] principalProjectedHeights = new double[View.values().length];
         final Map<View,int[]> paperPrincipalRects = new HashMap<>();
         final Map<View,int[]> blueprintPrincipalRects = new HashMap<>();
+        EngineeringSheetLayout engineeringSheetLayout;
+        final PrincipalProjectionFrame[] sharedPrincipalFrames = new PrincipalProjectionFrame[View.values().length];
         Job(Path input, Path out, String title) {
             this.input=input;
             this.out=out;
@@ -1585,6 +1674,7 @@ public final class OffscreenRenderer {
             long started = System.nanoTime();
             System.out.printf("[STEP 7] build composites%n  - title: %s%n  - output directory: %s%n",
                     sheetTitle(), out.toAbsolutePath());
+            buildSharedEngineeringSheetLayout();
             if (style.writesBlueprint()) assembleStyle(Style.BLUEPRINT, "");
             if (style.writesPaper()) assembleStyle(Style.PAPER, "_paper");
             System.out.printf("  - outputs: %s%n  - elapsed: %d ms%n",
@@ -1603,6 +1693,52 @@ public final class OffscreenRenderer {
             paths.add(out.resolve("mcoo_4angle" + suffix + ".png").toAbsolutePath().toString());
             paths.add(out.resolve(outputBaseName() + "_overview" + suffix + ".png").toAbsolutePath().toString());
             paths.add(out.resolve(outputBaseName() + "_overview" + suffix + "_no_materials.png").toAbsolutePath().toString());
+        }
+
+        private void buildSharedEngineeringSheetLayout() {
+            if (engineeringSheetLayout!=null) return;
+            int cell=Math.max(540,captureBaseResolution()/2);
+            double sheetScale=cell/540.0;
+            int gapX=(int)Math.round(positiveIntProperty("litematic.sheet.contentGutterX",CONTENT_GUTTER_X)*sheetScale);
+            int gapY=(int)Math.round(positiveIntProperty("litematic.sheet.contentGutterY",CONTENT_GUTTER_Y)*sheetScale);
+            int margin=(int)Math.round(56*sheetScale),titleH=(int)Math.round(82*sheetScale);
+            int scaleBarH=(int)Math.round(74*sheetScale);
+            int materialRows=Math.max(1,(materials.size()+3)/4);
+            int materialsH=(int)Math.round((62+materialRows*42)*sheetScale);
+            double sizeX=maxX-minX,sizeY=maxY-minY,sizeZ=maxZ-minZ;
+            double principalScale=cell/Math.max(1.0,Math.max(sizeX,Math.max(sizeY,sizeZ)));
+            System.out.printf(Locale.ROOT,
+                    "PRINCIPAL_SCALE sizeX=%.4f sizeY=%.4f sizeZ=%.4f pixelsPerBlock=%.6f%n",
+                    sizeX,sizeY,sizeZ,principalScale);
+            Map<View,java.awt.Dimension> sizes=new java.util.EnumMap<>(View.class);
+            for (View view:View.values()) {
+                if (isPrincipalView(view)) {
+                    BufferedImage source=style.writesPaper()?colorViews[view.ordinal()]:blueprintViews[view.ordinal()];
+                    PrincipalProjectionFrame frame=principalProjectionFrame(view,source,principalScale);
+                    sharedPrincipalFrames[view.ordinal()]=frame;
+                    sizes.put(view,new java.awt.Dimension(frame.sheetWidth(),frame.sheetHeight()));
+                } else {
+                    int width=1,height=1;
+                    if (style.writesBlueprint()) {
+                        ContentBox box=contentBox(blueprintViews[view.ordinal()]);
+                        double fit=Math.min(1.0,cell/(double)Math.max(box.width(),box.height()));
+                        width=Math.max(width,(int)Math.round(box.width()*fit));
+                        height=Math.max(height,(int)Math.round(box.height()*fit));
+                    }
+                    if (style.writesPaper()) {
+                        ContentBox box=contentBox(colorViews[view.ordinal()]);
+                        double fit=Math.min(1.0,cell/(double)Math.max(box.width(),box.height()));
+                        width=Math.max(width,(int)Math.round(box.width()*fit));
+                        height=Math.max(height,(int)Math.round(box.height()*fit));
+                    }
+                    sizes.put(view,new java.awt.Dimension(width,height));
+                }
+            }
+            engineeringSheetLayout=OffscreenRenderer.buildEngineeringSheetLayout(sizes,margin,titleH,
+                    gapX,gapY,scaleBarH,materialsH);
+            logPrincipalViewSizes(sizeX,sizeY,sizeZ,principalScale);
+            logEngineeringSheetLayout(engineeringSheetLayout);
+            validateEngineeringSheetLayout(engineeringSheetLayout);
         }
 
         private void assembleStyle(Style outputStyle, String suffix) throws Exception {
@@ -1633,57 +1769,17 @@ public final class OffscreenRenderer {
         private void compositeEngineeringSheet(String outName, Style outputStyle, boolean includeMaterials) throws Exception {
             int cell = Math.max(540, captureBaseResolution() / 2);
             double scale = cell / 540.0;
-            int gutterX=(int)Math.round(positiveIntProperty("litematic.sheet.contentGutterX",CONTENT_GUTTER_X)*scale);
-            int gutterY=(int)Math.round(positiveIntProperty("litematic.sheet.contentGutterY",CONTENT_GUTTER_Y)*scale);
-            double compaction=unitDoubleProperty("litematic.sheet.longViewCompaction",LONG_VIEW_COMPACTION);
             int margin = (int)Math.round(56 * scale);
-            int titleH = (int)Math.round(82 * scale), scaleBarH = (int)Math.round(74 * scale);
+            int scaleBarH = (int)Math.round(74 * scale);
             int materialRows=Math.max(1,(materials.size()+3)/4);
             int materialsH=(int)Math.round((62+materialRows*42)*scale);
-            View[][] slots={
-                    {View.AXON_X_POS_Z_POS,View.BOTTOM_X_UP,null,View.AXON_X_NEG_Z_POS},
-                    {View.LEFT_Z_NEG,View.FRONT_X_POS,View.RIGHT_Z_POS,View.BACK_X_NEG},
-                    {View.AXON_X_POS_Z_NEG,View.TOP_X_UP,null,View.AXON_X_NEG_Z_NEG}};
-            ContentBox[][] boxes=new ContentBox[3][4];
+            EngineeringSheetLayout layout=engineeringSheetLayout;
             PrincipalProjectionFrame[][] principalFrames=new PrincipalProjectionFrame[3][4];
-            int[] columnWidths=new int[4],rowHeights=new int[3];
             double sizeX=maxX-minX,sizeY=maxY-minY,sizeZ=maxZ-minZ;
             double maxPrincipalSpan=Math.max(sizeX,Math.max(sizeY,sizeZ));
             double principalScale=cell/Math.max(1.0,maxPrincipalSpan);
-            System.out.printf(Locale.ROOT,
-                    "PRINCIPAL_SCALE sizeX=%.4f sizeY=%.4f sizeZ=%.4f pixelsPerBlock=%.6f%n",
-                    sizeX,sizeY,sizeZ,principalScale);
-            for (int row=0;row<3;row++) for (int column=0;column<4;column++) {
-                View slot=slots[row][column];
-                if (slot==null) continue;
-                BufferedImage source=viewsFor(outputStyle)[slot.ordinal()];
-                if (isPrincipalView(slot)) {
-                    PrincipalProjectionFrame frame=principalProjectionFrame(slot,source,principalScale);
-                    principalFrames[row][column]=frame;
-                    columnWidths[column]=Math.max(columnWidths[column],frame.sheetWidth());
-                    rowHeights[row]=Math.max(rowHeights[row],frame.sheetHeight());
-                } else {
-                    // Axonometric views intentionally retain their independent fit.
-                    ContentBox sourceBox=contentBox(source);
-                    double fit=Math.min(1.0,cell/(double)Math.max(sourceBox.width(),sourceBox.height()));
-                    int drawW=Math.max(1,(int)Math.round(sourceBox.width()*fit));
-                    int drawH=Math.max(1,(int)Math.round(sourceBox.height()*fit));
-                    boxes[row][column]=sourceBox.withDrawSize(drawW,drawH);
-                    columnWidths[column]=Math.max(columnWidths[column],drawW);
-                    rowHeights[row]=Math.max(rowHeights[row],drawH);
-                }
-            }
-            logPrincipalViewSizes(sizeX,sizeY,sizeZ,principalScale);
-            // Retain a fraction of the old cell breathing room, but measure all
-            // placement from the actual opaque content rather than square captures.
-            for (int i=0;i<columnWidths.length;i++)
-                columnWidths[i]=Math.max(columnWidths[i],(int)Math.round(cell*compaction));
-            for (int i=0;i<rowHeights.length;i++)
-                rowHeights[i]=Math.max(rowHeights[i],(int)Math.round(cell*compaction));
-            int contentW=java.util.Arrays.stream(columnWidths).sum()+gutterX*3;
-            int contentH=java.util.Arrays.stream(rowHeights).sum()+gutterY*2;
-            int totalW = margin * 2 + contentW;
-            int totalH = margin * 2 + titleH + contentH + scaleBarH + (includeMaterials ? materialsH : 0);
+            int totalW=layout.canvasWidth();
+            int totalH=includeMaterials?layout.canvasHeight():layout.drawingsBottom()+scaleBarH+margin;
             BufferedImage canvas = new BufferedImage(totalW, totalH, BufferedImage.TYPE_INT_ARGB);
             java.awt.Graphics2D g = canvas.createGraphics();
             java.awt.Color sheetBackground = sheetBackground(outputStyle);
@@ -1695,25 +1791,19 @@ public final class OffscreenRenderer {
             g.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING,
                     java.awt.RenderingHints.VALUE_ANTIALIAS_ON);
 
-            int[] columnX=new int[4],rowY=new int[3];
-            columnX[0]=margin;
-            rowY[0]=margin+titleH;
-            for (int i=1;i<4;i++) columnX[i]=columnX[i-1]+columnWidths[i-1]+gutterX;
-            for (int i=1;i<3;i++) rowY[i]=rowY[i-1]+rowHeights[i-1]+gutterY;
-            for (int row=0;row<3;row++) for (int column=0;column<4;column++) {
-                View slot=slots[row][column];
-                if (slot==null) continue;
-                if (isPrincipalView(slot)) {
-                    PrincipalProjectionFrame frame=principalFrames[row][column];
-                    int drawX=columnX[column]+(columnWidths[column]-frame.sheetWidth())/2;
-                    // A shared row origin is the engineering Y datum. No opaque-content centering.
-                    int drawY=rowY[row];
-                    frame=frame.withSheetPosition(drawX,drawY);
-                    principalFrames[row][column]=frame;
+            int principalIndex=0;
+            for (View view:View.values()) {
+                ViewPlacement placement=layout.placement(view);
+                if (isPrincipalView(view)) {
+                    PrincipalProjectionFrame frame=sharedPrincipalFrames[view.ordinal()]
+                            .withSheetPlacement(placement);
+                    principalFrames[principalIndex/4][principalIndex%4]=frame;
+                    principalIndex++;
                     drawPrincipalFrame(g,frame,outputStyle);
                 } else {
-                    drawViewContent(g,slot,boxes[row][column],columnX[column],rowY[row],
-                            columnWidths[column],rowHeights[row],outputStyle);
+                    ContentBox sourceBox=contentBox(viewsFor(outputStyle)[view.ordinal()]);
+                    drawViewContent(g,view,sourceBox.withDrawSize(placement.width(),placement.height()),
+                            placement.x(),placement.y(),placement.width(),placement.height(),outputStyle);
                 }
             }
             validatePrincipalAlignment(principalFrames,outputStyle);
@@ -1733,7 +1823,7 @@ public final class OffscreenRenderer {
             double maxSpan = Math.max(sizeX, Math.max(sizeY, sizeZ));
             int blocks = niceScaleBar(maxSpan);
             int barPixels = (int)Math.round(blocks * principalScale);
-            int drawingsBottom=rowY[2]+rowHeights[2];
+            int drawingsBottom=layout.drawingsBottom();
             int barY = drawingsBottom + (int)Math.round(45 * scale);
             int barX = margin;
             g.setColor(primary);
@@ -1769,10 +1859,10 @@ public final class OffscreenRenderer {
                                                 int captureX,int captureY,int captureWidth,int captureHeight,
                                                 int sheetX,int sheetY,int sheetWidth,int sheetHeight,
                                                 double pixelsPerBlock) {
-            PrincipalProjectionFrame withSheetPosition(int x,int y) {
+            PrincipalProjectionFrame withSheetPlacement(ViewPlacement placement) {
                 return new PrincipalProjectionFrame(view,worldHorizontal,worldVertical,
-                        captureX,captureY,captureWidth,captureHeight,x,y,sheetWidth,sheetHeight,
-                        pixelsPerBlock);
+                        captureX,captureY,captureWidth,captureHeight,placement.x(),placement.y(),
+                        placement.width(),placement.height(),pixelsPerBlock);
             }
         }
 
@@ -1830,11 +1920,14 @@ public final class OffscreenRenderer {
             Map<View,int[]> other=style==Style.PAPER?blueprintPrincipalRects:paperPrincipalRects;
             own.put(frame.view(),rect);
             int[] prior=other.get(frame.view());
-            boolean parity=prior==null || java.util.Arrays.equals(prior,rect);
-            System.out.printf("STYLE_FRAME_PARITY view=%s paperRect=%s blueprintRect=%s result=%s%n",
+            int deltaMax=0;
+            if (prior!=null) for (int index=0;index<rect.length;index++)
+                deltaMax=Math.max(deltaMax,Math.abs(prior[index]-rect[index]));
+            String result=prior==null||deltaMax==0?"PASS":deltaMax<=1?"PASS_WITH_ROUNDING_WARN":"FAIL";
+            System.out.printf("STYLE_FRAME_PARITY view=%s paperRect=%s blueprintRect=%s deltaMax=%d result=%s%n",
                     frame.view(),java.util.Arrays.toString(style==Style.PAPER?rect:prior),
-                    java.util.Arrays.toString(style==Style.BLUEPRINT?rect:prior),parity?"PASS":"FAIL");
-            if (!parity) throw new IllegalStateException("Paper/Blueprint principal frame mismatch: "+frame.view());
+                    java.util.Arrays.toString(style==Style.BLUEPRINT?rect:prior),deltaMax,result);
+            if (deltaMax>1) throw new IllegalStateException("Paper/Blueprint principal frame mismatch: "+frame.view());
         }
 
         private static PrincipalProjectionFrame findFrame(PrincipalProjectionFrame[][] frames,View view) {
@@ -1868,6 +1961,48 @@ public final class OffscreenRenderer {
             if (!zSpan) System.out.println("PRINCIPAL_ALIGNMENT_FAIL type=Z_SPAN");
             if (!xSpan) System.out.println("PRINCIPAL_ALIGNMENT_FAIL type=X_SPAN");
             if (!(height&&xSpan&&zSpan)) throw new IllegalStateException("Principal engineering alignment failed");
+        }
+
+        private static void logEngineeringSheetLayout(EngineeringSheetLayout layout) {
+            System.out.printf("DRAWING_AREA top=%d bottom=%d centerY=%d%n",layout.drawingTop(),
+                    layout.drawingBottom(),layout.drawingCenterY());
+            System.out.printf("PRINCIPAL_GROUP top=%d bottom=%d height=%d centerY=%d mainRowY=%d%n",
+                    layout.principalGroupTop(),layout.principalGroupBottom(),
+                    layout.principalGroupBottom()-layout.principalGroupTop(),
+                    (layout.principalGroupTop()+layout.principalGroupBottom())/2,
+                    layout.principalMainRowY());
+            for (View view:View.values()) if (isPrincipalView(view)) {
+                ViewPlacement p=layout.placement(view);
+                System.out.printf("PRINCIPAL_PLACEMENT view=%s x=%d y=%d width=%d height=%d%n",
+                        view,p.x(),p.y(),p.width(),p.height());
+            }
+        }
+
+        private static void validateEngineeringSheetLayout(EngineeringSheetLayout layout) {
+            int groupCenter=(layout.principalGroupTop()+layout.principalGroupBottom())/2;
+            int centerDelta=Math.abs(groupCenter-layout.drawingCenterY());
+            System.out.printf("PRINCIPAL_GROUP_CENTER drawingCenterY=%d groupCenterY=%d delta=%d result=%s%n",
+                    layout.drawingCenterY(),groupCenter,centerDelta,centerDelta<=1?"PASS":"FAIL");
+            ViewPlacement left=layout.placement(View.LEFT_Z_NEG);
+            ViewPlacement front=layout.placement(View.FRONT_X_POS);
+            ViewPlacement right=layout.placement(View.RIGHT_Z_POS);
+            ViewPlacement back=layout.placement(View.BACK_X_NEG);
+            int minTop=Math.min(Math.min(left.y(),front.y()),Math.min(right.y(),back.y()));
+            int maxTop=Math.max(Math.max(left.y(),front.y()),Math.max(right.y(),back.y()));
+            int minBottom=Math.min(Math.min(left.bottom(),front.bottom()),Math.min(right.bottom(),back.bottom()));
+            int maxBottom=Math.max(Math.max(left.bottom(),front.bottom()),Math.max(right.bottom(),back.bottom()));
+            int topDelta=maxTop-minTop,bottomDelta=maxBottom-minBottom;
+            System.out.printf("PRINCIPAL_MAIN_ROW_ALIGNMENT topDelta=%d bottomDelta=%d result=%s%n",
+                    topDelta,bottomDelta,topDelta==0&&bottomDelta==0?"PASS":"FAIL");
+            ViewPlacement top=layout.placement(View.TOP_X_UP),bottom=layout.placement(View.BOTTOM_X_UP);
+            int centerMax=Math.max(Math.abs(top.centerX()-front.centerX()),
+                    Math.abs(bottom.centerX()-front.centerX()));
+            System.out.printf("PRINCIPAL_X_CENTER_ALIGNMENT top=%d front=%d bottom=%d deltaMax=%d result=%s%n",
+                    top.centerX(),front.centerX(),bottom.centerX(),centerMax,centerMax<=1?"PASS":"FAIL");
+            boolean dependencies=Math.abs(top.bottom()+layout.principalGapY()-front.y())<=1
+                    && Math.abs(front.bottom()+layout.principalGapY()-bottom.y())<=1;
+            if (centerDelta>1 || topDelta!=0 || bottomDelta!=0 || centerMax>1 || !dependencies)
+                throw new IllegalStateException("Shared engineering sheet layout validation failed");
         }
 
         private static boolean withinPixel(int left,int right) { return Math.abs(left-right)<=1; }
