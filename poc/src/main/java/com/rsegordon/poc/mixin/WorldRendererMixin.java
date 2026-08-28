@@ -4,6 +4,7 @@ import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.framegraph.FrameGraphBuilder;
 import com.mojang.blaze3d.resource.GraphicsResourceAllocator;
 import com.rsegordon.poc.BackgroundPass;
+import com.rsegordon.poc.OffscreenRenderer;
 import net.minecraft.client.CloudStatus;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.renderer.LevelRenderer;
@@ -19,6 +20,14 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 /** Removes atmospheric passes and controls the framebuffer clear for alpha matting. */
 @Mixin(LevelRenderer.class)
 public abstract class WorldRendererMixin {
+    @Inject(method = "render", at = @At("TAIL"))
+    private void litematicRender$worldFrameComplete(
+            GraphicsResourceAllocator allocator, DeltaTracker deltaTracker,
+            boolean renderBlockOutline, CameraRenderState camera, Matrix4fc modelView,
+            GpuBufferSlice projection, Vector4f clearColor, boolean renderSky,
+            CallbackInfo ci) {
+        OffscreenRenderer.afterWorldRendered();
+    }
     @Inject(method = "render", at = @At("HEAD"))
     private void litematicRender$setMatteBackground(
             GraphicsResourceAllocator allocator, DeltaTracker deltaTracker,

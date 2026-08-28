@@ -259,16 +259,16 @@ def _force_update(task_id, **changes):
 
 
 def _progress(task):
-    """Return the last completed renderer STEP (1..9) as a percentage."""
+    """Return the latest machine-readable, monotonic renderer progress."""
     if task.get("status") == "complete":
         return 100
     log_path = Path(task.get("output_dir", "")) / "render.log"
     try:
-        steps = [int(value) for value in re.findall(r"\[STEP ([1-9])\]", log_path.read_text(
-            encoding="utf-8", errors="ignore"))]
+        values = [int(value) for value in re.findall(r"RENDER_PROGRESS\s+progress=(\d{1,3})",
+            log_path.read_text(encoding="utf-8", errors="ignore"))]
     except OSError:
-        steps = []
-    return round(max(steps, default=0) * 100 / 9)
+        values = []
+    return max(0, min(100, max(values, default=0)))
 
 
 def _with_progress(task):
@@ -289,8 +289,9 @@ def _translate_log_line(line):
 def _progress_from_log(lines, status=None):
     if status == "complete":
         return 100
-    steps = [int(value) for line in lines for value in re.findall(r"\[STEP\s+([1-9])(?:/9)?\]", line)]
-    return round(max(steps) * 100 / 9) if steps else 0
+    values = [int(value) for line in lines for value in re.findall(
+        r"RENDER_PROGRESS\s+progress=(\d{1,3})", line)]
+    return max(0, min(100, max(values, default=0)))
 
 
 def _current_step(lines, status=None):
@@ -299,6 +300,16 @@ def _current_step(lines, status=None):
     if status == "failed":
         return "渲染失败"
     for line in reversed(lines):
+        match = re.search(r"RENDER_PROGRESS\s+progress=\d+\s+step=([A-Z_]+)(?:\s+view=([^\s]+))?", line)
+        if match:
+            labels = {
+                "WAIT_WORLD_READY": "等待世界加载", "LOAD_LITEMATIC": "加载投影",
+                "WAIT_RENDER_READY": "等待视图稳定", "CAPTURE_BLACK": "截图",
+                "CAPTURE_WHITE": "截图", "BUILD_PRINCIPAL_LAYOUT": "排版",
+                "BUILD_AXON_LAYOUT": "排版", "DONE": "渲染完成",
+            }
+            label = labels.get(match.group(1), match.group(1))
+            return label + (" " + match.group(2) if match.group(2) not in (None, "none") else "")
         translated = _translate_log_line(line)
         if any(marker in translated for marker in ("步骤", "生成", "构建", "加载", "渲染")):
             return translated[-80:]

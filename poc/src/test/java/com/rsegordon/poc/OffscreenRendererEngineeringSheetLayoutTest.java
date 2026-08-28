@@ -66,6 +66,25 @@ class OffscreenRendererEngineeringSheetLayoutTest {
         assertEquals(normal.principalGroupBottom(),hugeAxons.principalGroupBottom());
     }
 
+    @Test
+    void hugeAxonsAreFittedWithoutPrincipalIntersection() {
+        Map<OffscreenRenderer.View,Dimension> values=sizes(48,16,16);
+        for (OffscreenRenderer.View view:OffscreenRenderer.View.values())
+            if (view.name().startsWith("AXON_")) values.put(view,new Dimension(4000,3000));
+        OffscreenRenderer.EngineeringSheetLayout layout=build(values);
+        for (OffscreenRenderer.View axon:OffscreenRenderer.View.values()) {
+            if (!axon.name().startsWith("AXON_")) continue;
+            OffscreenRenderer.ViewPlacement a=layout.placement(axon);
+            for (OffscreenRenderer.View principal:OffscreenRenderer.View.values()) {
+                if (principal.name().startsWith("AXON_")) continue;
+                OffscreenRenderer.ViewPlacement p=layout.placement(principal);
+                int width=Math.max(0,Math.min(a.right(),p.right())-Math.max(a.x(),p.x()));
+                int height=Math.max(0,Math.min(a.bottom(),p.bottom())-Math.max(a.y(),p.y()));
+                assertEquals(0,width*height,axon+" vs "+principal);
+            }
+        }
+    }
+
     private static OffscreenRenderer.EngineeringSheetLayout layout(int x,int y,int z) {
         return build(sizes(x,y,z));
     }

@@ -102,7 +102,9 @@ class LiveStatusEndpointTest(unittest.TestCase):
             output = root / "output"
             output.mkdir()
             (output / "render.log").write_text(
-                "[01:18:04] [Render thread/INFO] (Minecraft) [STDOUT]: [STEP 4/9] WROTE COMPOSITE\n",
+                "[01:18:04] [Render thread/INFO] (Minecraft) [STDOUT]: "
+                "RENDER_PROGRESS progress=44 step=CAPTURE_BLACK view=FRONT_X_POS "
+                "message=\"Capturing\"\n",
                 encoding="utf-8",
             )
             task = {"id": "tail", "output_dir": str(output), "status": "rendering", "outputs": {}}
@@ -113,7 +115,7 @@ class LiveStatusEndpointTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["progress"], 44)
         self.assertIn("01:18:04 [INFO]", payload["lines"][0])
-        self.assertIn("已生成合成图", payload["lines"][0])
+        self.assertIn("RENDER_PROGRESS", payload["lines"][0])
         self.assertNotIn("Minecraft", payload["lines"][0])
 
 

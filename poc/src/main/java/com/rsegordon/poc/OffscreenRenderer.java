@@ -4,6 +4,7 @@ import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.regex.Pattern;
+import java.util.Set;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -95,6 +96,10 @@ public final class OffscreenRenderer {
     private static boolean worldStartRequested;
     private static ViewState activeView;
     private static volatile boolean paperFullbright;
+    private static final int REQUIRED_STABLE_RENDER_FRAMES = Math.max(1,
+            Integer.getInteger("litematic.render.stableFrames", 5));
+    private static final long VIEW_RENDER_READY_TIMEOUT_MS = Math.max(1_000L,
+            Long.getLong("litematic.render.readyTimeoutMs", 30_000L));
     static {
         ClientTickEvents.END_CLIENT_TICK.register(OffscreenRenderer::tick);
     }
@@ -140,6 +145,12 @@ public final class OffscreenRenderer {
             job.captureMaterialFrame(client);
     }
 
+    /** Called at LevelRenderer.render TAIL: the world is complete and GUI has not been drawn. */
+    public static void afterWorldRendered() {
+        Minecraft client=Minecraft.getInstance();
+        if (job!=null && activeView!=null) job.afterWorldRendered(client);
+    }
+
     private static float renderTargetAspect(Minecraft client) {
         var target = client.gameRenderer.mainRenderTarget();
         return target.height == 0 ? 1.0f : (float)target.width / target.height;
@@ -152,6 +163,7 @@ public final class OffscreenRenderer {
             if (!client.isGameLoadFinished() || client.gui.overlay() != null) return;
             if (!worldStartRequested) {
                 worldStartRequested = true;
+                job.progress.emit(6,"CREATE_VOID_WORLD",null,"Creating isolated void world");
                 String worldName = configuredWorldName();
                 deleteStaleRenderWorld(worldName);
                 client.options.renderDistance().set(RENDER_DISTANCE_CHUNKS);
@@ -179,6 +191,7 @@ public final class OffscreenRenderer {
         }
         try {
             if (!job.worldValidated) {
+                job.progress.emit(10,"WAIT_WORLD_READY",null,"Waiting for render world");
                 job.requestWorldValidation(client);
                 return;
             }
@@ -186,6 +199,7 @@ public final class OffscreenRenderer {
                 throw new IllegalStateException(job.worldValidationError);
             }
             if (!job.platformCleared) {
+                job.progress.emit(14,"VOID_WORLD_CHECK",null,"Validating void terrain");
                 int[] dimensions = job.readModelDimensions();
                 int originX = -Math.floorDiv(dimensions[0], 2);
                 int originZ = -Math.floorDiv(dimensions[2], 2);
@@ -204,6 +218,7 @@ public final class OffscreenRenderer {
                         + platformY + "," + minZ + "]-[" + maxX + "," + platformY + "," + maxZ + "]"
                         + " blocks=" + blocksCleared);
             }
+            job.progress.emit(18,"CHUNK_DISTANCE_CHECK",null,"Checking runtime chunk coverage");
             if (client.player == null) return;
             if (client.player.isDeadOrDying()) {
                 if (!job.respawnRequested) {
@@ -215,7 +230,7 @@ public final class OffscreenRenderer {
             }
             if (!job.playerSecured) job.securePlayer(client);
             if (!job.loaded && !job.requiredChunksReady(client, "LOAD", job.initialRequiredChunks())) return;
-            if (!job.loaded) { job.load(client); return; }
+            if (!job.loaded) { job.progress.emit(22,"LOAD_LITEMATIC",null,"Loading litematic"); job.load(client); return; }
             job.enforceCaptureTime(client);
             job.logEntityTickDiagnostic();
             job.freezeEntities();
@@ -227,8 +242,8 @@ public final class OffscreenRenderer {
             if (job.prepareCaptureTarget(client, view)) return;
             activeView = job.cameraFor(view, client);
             if (!job.synchronizeViewPosition(client, view, activeView)) return;
-            if (!job.requiredChunksReady(client, job.capturePass + ":" + view,
-                    job.requiredChunks())) return;
+            LinkedHashSet<ChunkPos> viewChunks=job.requiredChunks();
+            if (!job.requiredChunksReady(client, job.capturePass + ":" + view, viewChunks)) return;
             if (job.passRebuildPending) {
                 client.levelRenderer.invalidateCompiledGeometry(
                         client.level,client.options,client.gameRenderer.mainCamera(),client.getBlockColors());
@@ -244,8 +259,10 @@ public final class OffscreenRenderer {
                         job.capturePass,job.meshInvalidatedAt);
                 job.passRebuildPending = false;
                 job.wait = -120;
+                job.resetRenderReady(view);
                 return;
             }
+            if (!job.viewRenderReady(client, view, activeView, viewChunks)) return;
             job.wait++;
             if (job.blackPass == null) {
                 if (job.screenshotPending) return;
@@ -257,6 +274,7 @@ public final class OffscreenRenderer {
             if (job.wait < 5) return;
             job.requestCapture(client, view);
         } catch (Exception error) {
+            if (job!=null) job.progress.error("RENDER_FAILED", error.getMessage());
             System.out.printf("[STEP ERROR] render failed%n  - type: %s%n  - message: %s%n",
                     error.getClass().getName(), error.getMessage());
             error.printStackTrace();
@@ -346,6 +364,53 @@ public final class OffscreenRenderer {
         PAPER_COLOR, BLUEPRINT_EDGE
     }
 
+    static final class RenderReadyState {
+        private final int requiredFrames;
+        private int stableFrames;
+        RenderReadyState(int requiredFrames) {
+            if (requiredFrames < 1) throw new IllegalArgumentException("requiredFrames must be positive");
+            this.requiredFrames=requiredFrames;
+        }
+        boolean observe(boolean chunksReady, boolean overlayAbsent, boolean loadingScreenAbsent,
+                        boolean playerCorrect, boolean cameraCorrect) {
+            if (chunksReady && overlayAbsent && loadingScreenAbsent && playerCorrect && cameraCorrect)
+                stableFrames++;
+            else stableFrames=0;
+            return stableFrames>=requiredFrames;
+        }
+        int stableFrames() { return stableFrames; }
+        void reset() { stableFrames=0; }
+    }
+
+    static final class ProgressReporter {
+        private int progress=-1;
+        private String lastStep;
+        private View lastView;
+        private final Set<View> completedViews=java.util.EnumSet.noneOf(View.class);
+        synchronized void emit(int value,String step,View view,String message) {
+            if (value<0 || value>100) throw new IllegalArgumentException("progress outside 0..100: "+value);
+            value=Math.max(value,progress);
+            if (value==progress && step.equals(lastStep) && view==lastView) return;
+            progress=value;
+            lastStep=step;
+            lastView=view;
+            String viewValue=view==null?"none":view.name();
+            String escaped=message==null?"":message.replace('"','\'');
+            System.out.printf("RENDER_PROGRESS progress=%d step=%s view=%s message=\"%s\"%n",
+                    value,step,viewValue,escaped);
+            System.out.printf("[%3d%%] %s%s%n",value,step,view==null?"":" "+view.name());
+        }
+        synchronized void viewDone(View view,int value) {
+            completedViews.add(view); emit(value,"VIEW_DONE",view,"View capture complete");
+        }
+        synchronized void error(String code,String message) {
+            System.out.printf("RENDER_ERROR progress=%d step=FAILED view=none code=%s message=\"%s\"%n",
+                    Math.max(0,progress),code,message==null?"":message.replace('"','\''));
+        }
+        int progress() { return progress; }
+        Set<View> completedViews() { return Set.copyOf(completedViews); }
+    }
+
     private record ViewState(Vec3 position, Vec3 forward, Vec3 right, Vec3 up,
                              float halfSize, float farPlane,
                              double projectedWorldWidth, double projectedWorldHeight) {}
@@ -354,14 +419,25 @@ public final class OffscreenRenderer {
 
     record ViewPlacement(View view, int x, int y, int width, int height) {
         int bottom() { return y + height; }
+        int right() { return x + width; }
         int centerX() { return x + width / 2; }
+    }
+
+    record LayoutRect(int x,int y,int width,int height) {
+        int right() { return x+width; }
+        int bottom() { return y+height; }
+        int intersectionArea(ViewPlacement placement) {
+            int width=Math.max(0,Math.min(right(),placement.right())-Math.max(x,placement.x()));
+            int height=Math.max(0,Math.min(bottom(),placement.bottom())-Math.max(y,placement.y()));
+            return width*height;
+        }
     }
 
     record EngineeringSheetLayout(int canvasWidth, int canvasHeight,
             int drawingTop, int drawingBottom, int drawingCenterY,
             int principalGroupTop, int principalGroupBottom, int principalMainRowY,
             int principalGapX, int principalGapY, int drawingsBottom,
-            Map<View,ViewPlacement> placements) {
+            LayoutRect principalReservedRect,Map<View,ViewPlacement> placements) {
         ViewPlacement placement(View view) {
             ViewPlacement placement=placements.get(view);
             if (placement==null) throw new IllegalArgumentException("Missing placement for "+view);
@@ -383,16 +459,16 @@ public final class OffscreenRenderer {
         mainWidth+=gapX*(main.length-1);
         java.awt.Dimension top=fittedSizes.get(View.TOP_X_UP),bottom=fittedSizes.get(View.BOTTOM_X_UP);
         int groupHeight=top.height+gapY+mainHeight+gapY+bottom.height;
-        fitAxonHeight(fittedSizes,View.AXON_X_POS_Z_POS,top.height);
-        fitAxonHeight(fittedSizes,View.AXON_X_NEG_Z_POS,top.height);
-        fitAxonHeight(fittedSizes,View.AXON_X_POS_Z_NEG,bottom.height);
-        fitAxonHeight(fittedSizes,View.AXON_X_NEG_Z_NEG,bottom.height);
+        int halfSlotHeight=Math.max(1,(groupHeight-gapY)/2);
+        fitAxonHeight(fittedSizes,View.AXON_X_POS_Z_POS,halfSlotHeight);
+        fitAxonHeight(fittedSizes,View.AXON_X_NEG_Z_POS,halfSlotHeight);
+        fitAxonHeight(fittedSizes,View.AXON_X_POS_Z_NEG,halfSlotHeight);
+        fitAxonHeight(fittedSizes,View.AXON_X_NEG_Z_NEG,halfSlotHeight);
         int leftCorner=Math.max(fittedSizes.get(View.AXON_X_POS_Z_POS).width,
                 fittedSizes.get(View.AXON_X_POS_Z_NEG).width);
         int rightCorner=Math.max(fittedSizes.get(View.AXON_X_NEG_Z_POS).width,
                 fittedSizes.get(View.AXON_X_NEG_Z_NEG).width);
-        int centerColumn=Math.max(top.width,bottom.width);
-        int drawingWidth=Math.max(mainWidth,leftCorner+gapX+centerColumn+gapX+rightCorner);
+        int drawingWidth=leftCorner+gapX+mainWidth+gapX+rightCorner;
         // Principal geometry alone defines the drawing Y coordinate system.
         // Axonometric content is fitted into its corner bands above/below the main row.
         int drawingHeight=groupHeight;
@@ -400,7 +476,7 @@ public final class OffscreenRenderer {
         int drawingCenter=(drawingTop+drawingBottom)/2;
         int groupTop=drawingCenter-groupHeight/2;
         int mainY=groupTop+top.height+gapY;
-        int mainX=margin+(drawingWidth-mainWidth)/2;
+        int mainX=margin+leftCorner+gapX;
         Map<View,ViewPlacement> placements=new java.util.EnumMap<>(View.class);
         for (View view:main) {
             java.awt.Dimension size=fittedSizes.get(view);
@@ -412,6 +488,8 @@ public final class OffscreenRenderer {
                 front.centerX()-top.width/2,mainY-gapY-top.height,top.width,top.height));
         placements.put(View.BOTTOM_X_UP,new ViewPlacement(View.BOTTOM_X_UP,
                 front.centerX()-bottom.width/2,mainY+mainHeight+gapY,bottom.width,bottom.height));
+        LayoutRect reserved=new LayoutRect(margin+leftCorner,groupTop-gapY,
+                mainWidth+gapX*2,groupHeight+gapY*2);
         putCorner(placements,fittedSizes,View.AXON_X_POS_Z_POS,margin,drawingTop);
         putCorner(placements,fittedSizes,View.AXON_X_NEG_Z_POS,
                 margin+drawingWidth-fittedSizes.get(View.AXON_X_NEG_Z_POS).width,drawingTop);
@@ -423,7 +501,7 @@ public final class OffscreenRenderer {
         int canvasHeight=drawingBottom+scaleBarHeight+materialsHeight+margin;
         return new EngineeringSheetLayout(margin*2+drawingWidth,canvasHeight,drawingTop,
                 drawingBottom,drawingCenter,groupTop,groupTop+groupHeight,mainY,gapX,gapY,
-                drawingBottom,java.util.Collections.unmodifiableMap(placements));
+                drawingBottom,reserved,java.util.Collections.unmodifiableMap(placements));
     }
 
     private static void fitAxonHeight(Map<View,java.awt.Dimension> sizes,View view,int maxHeight) {
@@ -462,6 +540,7 @@ public final class OffscreenRenderer {
         final Path input, out; final String title; final Style style; final long renderTime, jobStarted;
         final double blueprintNightVision, blueprintGamma;
         boolean loaded, platformCleared, respawnRequested, playerSecured, screenshotPending, nightVisionApplied, passRebuildPending;
+        boolean worldCaptureBlackRequested,worldCaptureWhiteRequested;
         boolean coverageValidated;
         volatile boolean worldValidationStarted, worldValidated;
         volatile String worldValidationError;
@@ -474,6 +553,11 @@ public final class OffscreenRenderer {
         String chunkReadyKey;
         String chunkReadyPassedKey;
         long chunkReadyStarted, chunkReadyLastLog;
+        String renderReadyKey,renderReadyPassedKey;
+        long renderReadyStarted,renderReadyLastLog;
+        final RenderReadyState renderReadyState=new RenderReadyState(REQUIRED_STABLE_RENDER_FRAMES);
+        long worldRenderFrame;
+        long readinessObservedFrame=-1;
         boolean materialCapture, materialFrameReady;
         int materialCapturePhase, materialWait, writtenSingleViews;
         long passStarted, viewStarted, materialStarted;
@@ -504,6 +588,7 @@ public final class OffscreenRenderer {
         final Map<View,int[]> blueprintPrincipalRects = new HashMap<>();
         EngineeringSheetLayout engineeringSheetLayout;
         final PrincipalProjectionFrame[] sharedPrincipalFrames = new PrincipalProjectionFrame[View.values().length];
+        final ProgressReporter progress=new ProgressReporter();
         Job(Path input, Path out, String title) {
             this.input=input;
             this.out=out;
@@ -514,6 +599,93 @@ public final class OffscreenRenderer {
             this.blueprintNightVision=unitDoubleProperty("litematic.render.nightvision", 1.0);
             this.blueprintGamma=positiveDoubleProperty("litematic.render.gamma", 2.5);
             this.capturePass=style.writesPaper() ? CapturePass.PAPER_COLOR : CapturePass.BLUEPRINT_EDGE;
+            progress.emit(0,"START",null,"Render job started");
+            progress.emit(3,"VALIDATE_INPUT",null,"Validating litematic input");
+        }
+
+        private static boolean isLoadingScreen(Screen screen) {
+            if (screen==null) return false;
+            String name=screen.getClass().getSimpleName();
+            return name.equals("ReceivingLevelScreen") || name.equals("ProgressScreen")
+                    || name.equals("LevelLoadingScreen") || name.contains("TerrainLoading")
+                    || name.equals("LoadingOverlay");
+        }
+
+        void resetRenderReady(View view) {
+            renderReadyKey=null;
+            renderReadyPassedKey=null;
+            renderReadyState.reset();
+            readinessObservedFrame=-1;
+        }
+
+        boolean viewRenderReady(Minecraft client,View view,ViewState state,
+                                LinkedHashSet<ChunkPos> required) {
+            String key=capturePass+":"+view;
+            long now=System.nanoTime();
+            if (!key.equals(renderReadyKey)) {
+                renderReadyKey=key; renderReadyStarted=now; renderReadyLastLog=0;
+                renderReadyPassedKey=null;
+                renderReadyState.reset(); readinessObservedFrame=-1;
+                progress.emit(viewProgress(view,1),"WAIT_RENDER_READY",view,
+                        "Waiting for stable world render frames");
+            }
+            if (key.equals(renderReadyPassedKey)) return true;
+            boolean chunksReady=missingChunks(required,
+                    chunk -> client.level!=null && client.level.hasChunk(chunk.x(),chunk.z())).isEmpty();
+            boolean overlayAbsent=client.gui.overlay()==null;
+            Screen screen=client.gui.screen();
+            boolean loadingAbsent=client.isGameLoadFinished() && !isLoadingScreen(screen);
+            double playerY=state.position.y-client.player.getEyeHeight();
+            boolean playerCorrect=client.player.position().distanceToSqr(
+                    state.position.x,playerY,state.position.z)<0.0001;
+            boolean cameraCorrect=activeView==state;
+            if (readinessObservedFrame!=worldRenderFrame) {
+                readinessObservedFrame=worldRenderFrame;
+                renderReadyState.observe(chunksReady,overlayAbsent,loadingAbsent,playerCorrect,cameraCorrect);
+            }
+            long elapsedMs=(now-renderReadyStarted)/1_000_000;
+            boolean ready=renderReadyState.stableFrames()>=REQUIRED_STABLE_RENDER_FRAMES;
+            if (ready) {
+                renderReadyPassedKey=key;
+                System.out.printf("VIEW_RENDER_READY view=%s chunksReady=%s overlay=%s screen=%s "
+                                +"stableFrames=%d elapsedMs=%d result=PASS%n",view,chunksReady,
+                        !overlayAbsent,screen==null?"none":screen.getClass().getSimpleName(),
+                        renderReadyState.stableFrames(),elapsedMs);
+                return true;
+            }
+            if (elapsedMs>=VIEW_RENDER_READY_TIMEOUT_MS) {
+                System.out.printf("VIEW_RENDER_READY_TIMEOUT view=%s chunksReady=%s overlay=%s screen=%s "
+                                +"stableFrames=%d elapsedMs=%d%n",view,chunksReady,!overlayAbsent,
+                        screen==null?"none":screen.getClass().getSimpleName(),
+                        renderReadyState.stableFrames(),elapsedMs);
+                progress.error("VIEW_RENDER_READY_TIMEOUT",
+                        "World render did not stabilize within 30 seconds");
+                throw new IllegalStateException("VIEW_RENDER_READY_TIMEOUT for "+view);
+            }
+            if (renderReadyLastLog==0 || now-renderReadyLastLog>=1_000_000_000L) {
+                renderReadyLastLog=now;
+                System.out.printf("VIEW_RENDER_READY view=%s chunksReady=%s overlay=%s screen=%s "
+                                +"stableFrames=%d/%d elapsedMs=%d result=WAIT%n",view,chunksReady,
+                        !overlayAbsent,screen==null?"none":screen.getClass().getSimpleName(),
+                        renderReadyState.stableFrames(),REQUIRED_STABLE_RENDER_FRAMES,elapsedMs);
+            }
+            return false;
+        }
+
+        private static int viewProgress(View view,int phase) {
+            return Math.min(75,40+view.ordinal()*3+Math.max(0,Math.min(3,phase)));
+        }
+
+        void afterWorldRendered(Minecraft client) {
+            worldRenderFrame++;
+            if (screenshotPending) return;
+            if (worldCaptureBlackRequested) {
+                worldCaptureBlackRequested=false;
+                captureBlackWorldFrame(client);
+            } else if (worldCaptureWhiteRequested) {
+                worldCaptureWhiteRequested=false;
+                captureWhiteWorldFrame(client,View.values()[Math.min(view,View.values().length-1)]);
+            }
         }
 
         void requestWorldValidation(Minecraft client) throws Exception {
@@ -735,6 +907,7 @@ public final class OffscreenRenderer {
             long[] packed=region.getLongArray("BlockStates").orElseThrow(); int bits=Math.max(2, 32-Integer.numberOfLeadingZeros(palette.size()-1)); long mask=(1L<<bits)-1;
             BlockPos origin=new BlockPos(originX,originY,originZ);
             clearRenderBounds(client,origin,sx,sy,sz);
+            progress.emit(26,"PLACE_BLOCKS",null,"Placing litematic blocks");
             long[] paletteCounts = new long[palette.size()];
             for (int y=0;y<sy;y++) for (int z=0;z<sz;z++) for (int x=0;x<sx;x++) {
                 int n=(y*sz+z)*sx+x, start=n*bits, word=start>>>6, shift=start&63;
@@ -761,6 +934,7 @@ public final class OffscreenRenderer {
                 if (be!=null) client.level.setBlockEntity(be);
             }
             ListTag entities=region.getListOrEmpty("Entities");
+            progress.emit(30,"LOAD_ENTITIES",null,"Loading litematic entities");
             Vec3 entityOrigin=new Vec3(
                     origin.getX()+(sizeX<0?sx-1:0),
                     origin.getY()+(sizeY<0?sy-1:0),
@@ -829,6 +1003,7 @@ public final class OffscreenRenderer {
             previousGamma = client.options.gamma().get();
             previousDayTime = client.level.getOverworldClockTime();
             client.options.renderDistance().set(RENDER_DISTANCE_CHUNKS);
+            progress.emit(34,"PREPARE_RENDERER",null,"Preparing capture renderer");
             configureCapturePass(client);
             validateAllViewCoverage(client);
             // Recreate section geometry with the safe 26.2 path. Unlike
@@ -840,6 +1015,7 @@ public final class OffscreenRenderer {
             System.out.printf("PAPER_MESH_REBUILD pass=%s requested=true settled=false invalidateNanos=%d%n",
                     capturePass,meshInvalidatedAt);
             loaded=true;
+            progress.emit(38,"START_VIEWS",null,"Starting ten engineering views");
             System.out.printf("  - loaded: %dx%dx%d palette=%d tiles=%d entities=%d mounted=%d%n  - elapsed: %d ms%n  - bounds: [%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f]%n",
                     sx,sy,sz,palette.size(),tiles.size(),entityCount,mountedEntityCount,
                     (System.nanoTime()-loadStarted)/1_000_000,
@@ -1333,6 +1509,13 @@ public final class OffscreenRenderer {
         }
 
         void requestBlackPass(Minecraft client) {
+            if (worldCaptureBlackRequested) return;
+            View captureView=View.values()[Math.min(view,View.values().length-1)];
+            progress.emit(viewProgress(captureView,2),"CAPTURE_BLACK",captureView,"Capturing world-only black matte");
+            worldCaptureBlackRequested=true;
+        }
+
+        private void captureBlackWorldFrame(Minecraft client) {
             View captureView = View.values()[Math.min(view, View.values().length - 1)];
             viewStarted = System.nanoTime();
             if (isPrincipalView(captureView)) {
@@ -1372,6 +1555,12 @@ public final class OffscreenRenderer {
         }
 
         void requestCapture(Minecraft client, View view) {
+            if (worldCaptureWhiteRequested) return;
+            progress.emit(viewProgress(view,3),"CAPTURE_WHITE",view,"Capturing world-only white matte");
+            worldCaptureWhiteRequested=true;
+        }
+
+        private void captureWhiteWorldFrame(Minecraft client, View view) {
             // We capture the white-background pass second; the black-background
             // pass was captured at the start of this view. matte(black, white)
             // derives per-pixel transparency from the difference between the two
@@ -1460,8 +1649,11 @@ public final class OffscreenRenderer {
         }
 
         void viewComplete(Minecraft client) throws Exception {
+            View completed=View.values()[view];
+            progress.viewDone(completed,viewProgress(completed,3));
             view++;
             wait = 0;
+            resetRenderReady(completed);
             if (view == View.values().length) {
                 if (capturePass == CapturePass.PAPER_COLOR && style.writesBlueprint()) {
                     capturePass = CapturePass.BLUEPRINT_EDGE;
@@ -1525,14 +1717,18 @@ public final class OffscreenRenderer {
                         materialBlackPass=null;
                         client.setScreenAndShow(null);
                         assembleComposites();
+                        progress.emit(93,"MATERIALS",null,"Material section assembled");
+                        progress.emit(96,"WORKBOOK",null,"Writing material workbook");
                         Path workbook = MaterialWorkbookWriter.write(out, input.getFileName().toString(),
                                 materials.stream().map(entry -> new MaterialWorkbookWriter.Row(entry.name, entry.count)).toList());
                         System.out.println("WROTE MATERIAL WORKBOOK " + workbook.toAbsolutePath());
                         Path archive = OutputArchiveWriter.write(out, outputBaseName(), workbook);
                         System.out.println("WROTE OUTPUT ARCHIVE " + archive.toAbsolutePath());
+                        progress.emit(98,"FINALIZE",null,"Finalizing output archive");
                         finish(client);
                     }
                 } catch (Exception error) {
+                    progress.error("MATERIAL_OR_COMPOSITE_FAILED",error.getMessage());
                     System.out.printf("[STEP ERROR] material/composite render failed%n  - message: %s%n",
                             error.getMessage());
                     error.printStackTrace();
@@ -1604,6 +1800,7 @@ public final class OffscreenRenderer {
                 setOverworldClock(client, previousDayTime, 1.0f);
                 System.out.printf("[STEP 9] done%n  - output: %s%n  - total elapsed: %d ms%n",
                         out.toAbsolutePath(), (System.nanoTime() - jobStarted) / 1_000_000);
+                progress.emit(100,"DONE",null,"Render complete");
                 System.out.println("LITEMATIC_RENDER_DONE " + out);
                 client.stop();
                 job = null;
@@ -1672,11 +1869,18 @@ public final class OffscreenRenderer {
         /** Build the two composites and write them out. */
         void assembleComposites() throws Exception {
             long started = System.nanoTime();
+            progress.emit(76,"BUILD_PRINCIPAL_LAYOUT",null,"Freezing principal layout");
             System.out.printf("[STEP 7] build composites%n  - title: %s%n  - output directory: %s%n",
                     sheetTitle(), out.toAbsolutePath());
             buildSharedEngineeringSheetLayout();
-            if (style.writesBlueprint()) assembleStyle(Style.BLUEPRINT, "");
-            if (style.writesPaper()) assembleStyle(Style.PAPER, "_paper");
+            if (style.writesPaper()) {
+                progress.emit(86,"ASSEMBLE_PAPER",null,"Assembling paper engineering sheet");
+                assembleStyle(Style.PAPER, "_paper");
+            }
+            if (style.writesBlueprint()) {
+                progress.emit(90,"ASSEMBLE_BLUEPRINT",null,"Assembling blueprint engineering sheet");
+                assembleStyle(Style.BLUEPRINT, "");
+            }
             System.out.printf("  - outputs: %s%n  - elapsed: %d ms%n",
                     compositeOutputPaths(), (System.nanoTime() - started) / 1_000_000);
         }
@@ -1736,9 +1940,11 @@ public final class OffscreenRenderer {
             }
             engineeringSheetLayout=OffscreenRenderer.buildEngineeringSheetLayout(sizes,margin,titleH,
                     gapX,gapY,scaleBarH,materialsH);
+            progress.emit(80,"BUILD_AXON_LAYOUT",null,"Fitting axonometric slots");
             logPrincipalViewSizes(sizeX,sizeY,sizeZ,principalScale);
             logEngineeringSheetLayout(engineeringSheetLayout);
             validateEngineeringSheetLayout(engineeringSheetLayout);
+            progress.emit(83,"COLLISION_CHECK",null,"Validating view collisions");
         }
 
         private void assembleStyle(Style outputStyle, String suffix) throws Exception {
@@ -2001,8 +2207,24 @@ public final class OffscreenRenderer {
                     top.centerX(),front.centerX(),bottom.centerX(),centerMax,centerMax<=1?"PASS":"FAIL");
             boolean dependencies=Math.abs(top.bottom()+layout.principalGapY()-front.y())<=1
                     && Math.abs(front.bottom()+layout.principalGapY()-bottom.y())<=1;
+            boolean collisions=false;
+            for (View axon:View.values()) if (!isPrincipalView(axon)) {
+                ViewPlacement axonPlacement=layout.placement(axon);
+                for (View principal:View.values()) if (isPrincipalView(principal)) {
+                    ViewPlacement p=layout.placement(principal);
+                    int width=Math.max(0,Math.min(axonPlacement.right(),p.right())
+                            -Math.max(axonPlacement.x(),p.x()));
+                    int height=Math.max(0,Math.min(axonPlacement.bottom(),p.bottom())
+                            -Math.max(axonPlacement.y(),p.y()));
+                    int area=width*height;
+                    System.out.printf("VIEW_COLLISION_CHECK axon=%s principal=%s intersectionArea=%d result=%s%n",
+                            axon,principal,area,area==0?"PASS":"FAIL");
+                    collisions|=area!=0;
+                }
+            }
             if (centerDelta>1 || topDelta!=0 || bottomDelta!=0 || centerMax>1 || !dependencies)
                 throw new IllegalStateException("Shared engineering sheet layout validation failed");
+            if (collisions) throw new IllegalStateException("Axonometric view overlaps principal reserved area");
         }
 
         private static boolean withinPixel(int left,int right) { return Math.abs(left-right)<=1; }
