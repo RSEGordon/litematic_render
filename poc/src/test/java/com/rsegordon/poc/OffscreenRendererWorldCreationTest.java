@@ -22,4 +22,18 @@ class OffscreenRendererWorldCreationTest {
         assertFalse(source.contains(".openWorld(\"World\""));
         assertFalse(source.contains("minecraft:overworld"));
     }
+
+    @Test
+    void clearsSpawnPlatformOnceBeforeLoadingTheLitematic() throws Exception {
+        String source = Files.readString(SOURCE);
+
+        int clear = source.indexOf("if (!job.platformCleared)");
+        int load = source.indexOf("job.load(client)");
+        assertTrue(clear >= 0 && clear < load);
+        assertTrue(source.contains("RENDER_DISTANCE_CHUNKS * 16"));
+        assertTrue(source.contains("LITEMATIC_RENDER_PLATFORM_CLEARED"));
+        assertTrue(source.contains("new BlockPos(x, 0, z)"));
+        assertTrue(source.contains("Blocks.AIR.defaultBlockState()"));
+        assertTrue(source.contains("job.platformCleared = true"));
+    }
 }

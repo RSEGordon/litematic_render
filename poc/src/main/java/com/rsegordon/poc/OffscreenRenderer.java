@@ -164,8 +164,18 @@ public final class OffscreenRenderer {
             }
             return;
         }
-        if (client.player == null) return;
         try {
+            if (!job.platformCleared) {
+                int range = RENDER_DISTANCE_CHUNKS * 16;
+                int blocksCleared = clearSpawnPlatform(range, Blocks.AIR.defaultBlockState(),
+                        (pos, state) -> client.level.setBlock(pos, state, 3));
+                job.platformCleared = true;
+                int chunksWide = RENDER_DISTANCE_CHUNKS * 2 + 1;
+                System.out.println("LITEMATIC_RENDER_PLATFORM_CLEARED range=" + range
+                        + " chunks=" + (chunksWide * chunksWide)
+                        + " blocks=" + blocksCleared);
+            }
+            if (client.player == null) return;
             if (client.player.isDeadOrDying()) {
                 if (!job.respawnRequested) {
                     job.respawnRequested = true;
@@ -231,6 +241,23 @@ public final class OffscreenRenderer {
         }
     }
 
+    @FunctionalInterface
+    interface BlockSetter {
+        void set(BlockPos pos, BlockState state);
+    }
+
+    static int clearSpawnPlatform(int range, BlockState fillState, BlockSetter setter) {
+        if (range < 0) throw new IllegalArgumentException("range must not be negative");
+        int blocksCleared = 0;
+        for (int x = -range; x <= range; x++) {
+            for (int z = -range; z <= range; z++) {
+                setter.set(new BlockPos(x, 0, z), fillState);
+                blocksCleared++;
+            }
+        }
+        return blocksCleared;
+    }
+
     /**
      * V76 engineering views.  The yaw/pitch values are Minecraft camera angles;
      * cameraFor() converts them to a look vector with sin/cos.  Cardinal names
@@ -271,7 +298,7 @@ public final class OffscreenRenderer {
     private static final class Job {
         final Path input, out; final String title; final Style style; final long renderTime, jobStarted;
         final double blueprintNightVision, blueprintGamma;
-        boolean loaded, respawnRequested, playerSecured, screenshotPending, nightVisionApplied, passRebuildPending;
+        boolean loaded, platformCleared, respawnRequested, playerSecured, screenshotPending, nightVisionApplied, passRebuildPending;
         boolean materialCapture, materialFrameReady;
         int materialCapturePhase, materialWait, writtenSingleViews;
         long passStarted, viewStarted, materialStarted;
