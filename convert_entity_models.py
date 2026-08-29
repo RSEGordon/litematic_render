@@ -18,7 +18,9 @@ import math
 from pathlib import Path
 
 SRC_DIR = Path('/tmp/allay_search/EntityModelJson/vanilla_layers/main')
-DST_DIR = Path('/home/rsegordon/.hermes/scripts/litematic_render/client_assets/assets/minecraft/models/entity')
+# Resolve the entity-model destination relative to this file's location;
+# the absolute /home/<user>/... path was author-specific.
+DST_DIR = Path(__file__).resolve().parent / "client_assets/assets/minecraft/models/entity"
 
 # Entity textures keep their native pixel dimensions; transformed geometry is
 # uniformly fitted to the renderer's 0..16 model space after all bones are read.
