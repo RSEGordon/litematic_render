@@ -18,20 +18,30 @@ rendered through the V153 6-view pipeline.*
 
 ## ⚠️ 本地化提示 / Localization Notice
 
-> **本仓基于老板 (`RSEGordon`) 个人开发环境配置,与具体机器 / 路径 / 用户强绑定。**
-> **如果切换为公开仓,或换机器运行,需要先做本地化。请见 [`LOCALIZE.md`](./LOCALIZE.md) 中的清单。**
+> **历史背景.** Buckets A 和 B (LOCALIZE.md) 已经过了。Java 包名迁到
+> `io.github.rsegordon.litematic_render`、app.py 的硬编码绝对路径改读
+> env-var + `~/litematic_render_tasks/` fallback、JDK 默认路径改成强制
+> env-var、`gradle.properties` group 重命名、JUnit 测试 fixture 移到
+> classpath resource、Fabric Loader / mixins 配置改成新包名、UI 标签
+> 译成英文。
 >
-> ⚠️ **DO NOT flip the repo to `public` visibility until you have walked through Bucket A in LOCALIZE.md.**
-> Until then, the working tree still contains author-specific absolute paths in code
-> (`poc/tools/litematic_render_ui/app.py`), Java test fixtures
-> (`MaterialWorkbookWriter.java:20`), and historical V-plan markdown files
-> (`V53_POC_plan.md`, `V54_POC_RESURRECT_REPORT.md`, etc.). Those will leak
-> the author's home directory layout to anyone with read access.
+> ⚠️ **仍残留.** Bucket C (`V53_POC_plan.md` / `V54_POC_RESURRECT_REPORT.md` /
+> `V55_Z_FLIP_FIX.md` / `V62_DYNAMIC_CAMERA.md` / `CODEX_TASK*.md`) 是
+> 历史调研快照,仓库根目录可看到作者 home 路径 (反编译 MC 源、`hermes`
+> 缓存布局)。这是 git 历史的一部分;切公开后别人能看到。如要清除需要
+> `git-filter-repo` 重写历史。
 >
-> **This repository is hardwired to author `RSEGordon`'s personal
-> development environment.** Before publishing publicly, running on a
-> different machine, or merging into a different owner's fork, see
-> [`LOCALIZE.md`](./LOCALIZE.md) for the items that need to change.
+> **Historical context.** Java package moved to `io.github.rsegordon
+> .litematic_render`; hardcoded absolute paths in `app.py` are now
+> env-var-driven with a `~/litematic_render_tasks/` fallback;
+> `LITEMATIC_RENDER_JAVA_HOME` is required (no embedded default);
+> `gradle.properties` group matches the new package; test fixture
+> XLSX is on the classpath; UI labels translated to English.
+>
+> **Caveat:** historical V-plan and CODEX_TASK markdown files at repo
+> root still contain author-absolute paths (Bucket C, see LOCALIZE.md).
+> Git history preserves them. Scrubbing requires `git-filter-repo` and
+> a force-push.
 
 ---
 
@@ -168,29 +178,29 @@ JDK 不在 `PATH` 上时,设置 `LITEMATIC_RENDER_JAVA_HOME`。
 
 ```
 poc/
-├── src/main/java/com/rsegordon/poc/
+├── src/main/java/io/github/rsegordon/litematic_render/
 │   ├── LitematicRenderCommand.java    # /gradlew runClient entry point
 │   ├── LitematicRenderMod.java        # mod entry; wires the renderer
 │   ├── OffscreenRenderer.java         # capture + composite + materials walk
-│   ├── MaterialWorkbookWriter.java    # XLSX output  ⚠ LOCALIZE item C-2
+│   ├── MaterialWorkbookWriter.java    # XLSX output
 │   ├── OutputArchiveWriter.java       # tar.gz bundle of all artifacts
 │   ├── BackgroundPass.java            # paper background fill pass
 │   └── mixin/                         # fabric mixins for off-screen capture
-├── src/test/java/com/rsegordon/poc/   # ⚠ LOCALIZE item C-2 (Java package)
+├── src/test/java/io/github/rsegordon/litematic_render/
 │   ├── OffscreenRendererEngineeringSheetLayoutTest.java
 │   ├── OffscreenRendererMaterialsLayoutTest.java
 │   ├── OffscreenRendererChunkCoverageTest.java
 │   ├── OffscreenRendererPrincipalProjectionTest.java
-│   ├── OffscreenRendererWorldCreationTest.java       # ⚠ hardcoded src/ path
+│   ├── OffscreenRendererWorldCreationTest.java
 │   ├── OffscreenRendererVoidTerrainTest.java
 │   ├── OffscreenRendererPlatformClearTest.java
 │   ├── OffscreenRendererProgressTest.java
 │   ├── OffscreenRendererRenderReadyTest.java
-│   ├── MaterialWorkbookWriterTest.java               # ⚠ hardcoded fixtures
+│   ├── MaterialWorkbookWriterTest.java
 │   ├── OutputArchiveWriterTest.java
 │   └── SingleViewTransparencyTest.java
-└── tools/litematic_render_ui/                         # ⚠ LOCALIZE item A-3
-    ├── app.py                          # Flask blueprint (硬编码路径)
+└── tools/litematic_render_ui/
+    ├── app.py                          # Flask blueprint (env-var-driven paths)
     └── templates/                      # 4 Jinja2 templates
 ```
 
@@ -198,19 +208,19 @@ poc/
 
 ```
 poc/
-├── src/main/java/com/rsegordon/poc/    # ⚠ LOCALIZE C-2 (包名)
+├── src/main/java/io/github/rsegordon/litematic_render/
 │   ├── LitematicRenderCommand.java    # /gradlew runClient 入口
 │   ├── LitematicRenderMod.java        # mod 入口,装配渲染器
 │   ├── OffscreenRenderer.java         # 捕获 + 合成 + 材料遍历
-│   ├── MaterialWorkbookWriter.java    # XLSX 输出  ⚠ 本地化项 C-2
+│   ├── MaterialWorkbookWriter.java    # XLSX 输出
 │   ├── OutputArchiveWriter.java       # tar.gz 打包所有产物
 │   ├── BackgroundPass.java            # paper 底色填充 pass
 │   └── mixin/                         # Fabric mixins,离屏捕获
-├── src/test/java/com/rsegordon/poc/   # ⚠ 本地化项 C-2 (Java 包名)
-│   ├── ...11 个 JUnit 5 测试...        # 部分测试含硬编码路径 ⚠ C-1
-└── tools/litematic_render_ui/         # ⚠ 本地化项 A-3 (硬编码路径)
-    ├── app.py                          # Flask 蓝图 (含硬编码绝对路径)
-    └── templates/                      # 4 个 Jinja2 模板
+├── src/test/java/io/github/rsegordon/litematic_render/
+│   ├── ...11 个 JUnit 5 测试...
+└── tools/litematic_render_ui/
+    ├── app.py                          # Flask 蓝图 (env-var-driven)
+    └── templates/                      # 4 个 Jinja2 模板 (英文 UI 标签)
 ```
 
 ---
@@ -267,7 +277,8 @@ poc/
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LITEMATIC_RENDER_JAVA_HOME` | `/opt/java/jdk-25.0.1` ⚠ LOCALIZE A-1 | JDK location for the renderer. |
+| `LITEMATIC_RENDER_DIR` | `~/litematic_render_tasks/` | Storage root for uploaded litematics and per-task artifacts. |
+| `LITEMATIC_RENDER_JAVA_HOME` | (required, no default) | JDK location for the renderer. Set on the deploy host. |
 | `LITEMATIC_RENDER_DISTANCE_CHUNKS` | `32` | chunk radius covered per task. |
 | `LITEMATIC_RENDER_DISTANCE_SAFETY_CHUNKS` | `2` | extra chunks for safe edge clipping. |
 
@@ -297,9 +308,6 @@ behavior, chunk coverage, progress reporting, and the XLSX / archive
 writers. They run headlessly — no Minecraft client is booted during
 tests.
 
-> Note: a couple of tests rely on fixture XLSX paths under
-> `/home/rsegordon/.hermes/cache/documents/` — see LOCALIZE C-1.
-
 **中文.**
 
 ```bash
@@ -311,8 +319,8 @@ cd poc
 世界创建、spawn 平台清除、区块覆盖、进度上报、XLSX / 归档写入器。无头
 执行,测试时不启动 MC 客户端。
 
-> 注:有少量测试依赖 `/home/rsegordon/.hermes/cache/documents/` 下的
-> fixture XLSX 路径,见 LOCALIZE C-1。
+> 注:owner workbook 测试 fixture (`owner_workbook_template.xlsx`) 现在
+> 走 classpath,见 LOCALIZE B-2。
 
 ---
 
@@ -390,10 +398,18 @@ traceability — they show how the project started and what we discarded.
 
 ## 📝 License / 许可证
 
-**EN.** Private project. All rights reserved unless explicitly
-transferred.
+**EN.** Personal project. The render client (`poc/src/main/java/`)
+is the author's own code. The materials workbook template XLSX bundled
+in `src/test/resources/` is the author's own — third-party owners of
+their own Minecraft schematics should provide their own template.
 
-**中文.** 私人项目,保留所有权利。未经明确授权不得转用。
+No explicit open-source license is granted. By default, "all rights
+reserved" applies (since no LICENSE file is shipped). The author may
+add a license in a future commit.
+
+**中文.** 个人项目,保留所有权利。Matrials workbook 的 owner template 由
+作者本人提供,如需重用于别的 Minecraft 投影,使用者应替换成自己的
+template XLSX。当前未发布 LICENSE 文件,默认按"保留所有权利"处理。
 
 ---
 
