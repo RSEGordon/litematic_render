@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-    <title>{{(metadata.name if metadata and metadata.name else '投影渲染')}} · 工具 · Hermes</title>
+    <title>{{(metadata.name if metadata and metadata.name else 'Litematic Render')}} · Tools · Hermes</title>
     <link rel="icon" href="/favicon.png">
     <link rel="stylesheet" href="/css/morandi">
     <style>
@@ -86,10 +86,10 @@
     <div class="container">
         <div class="header">
             <div class="header-left">
-                <h1>🧱 投影渲染与备货</h1>
+                <h1>🧱 Litematic Render & Materials Workbook</h1>
             </div>
             <div class="header-right">
-                <a href="/tools" class="back-arrow" title="返回工具" aria-label="返回工具">
+                <a href="/tools" class="back-arrow" title="Back to Tools" aria-label="Back to Tools">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
                 </a>
             </div>
@@ -97,23 +97,23 @@
 
         <form class="input-form" action="/tools/litematic_render/upload" method="post" enctype="multipart/form-data" id="upload-form">
             <span class="upload-icon">📦</span>
-            <p class="upload-title">上传 Litematica 投影</p>
-            <p class="upload-subtitle">支持 .litematic 文件 · 拖拽到此处或点击下方按钮</p>
+            <p class="upload-title">Upload Litematic schematic</p>
+            <p class="upload-subtitle">Supports .litematic files — drag in or click below</p>
             <input class="file-input" name="litematic" type="file" accept=".litematic" id="litematic-input" required>
             <label class="file-pick" for="litematic-input">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                选择文件
+                Choose file
             </label>
-            <span class="file-name" id="file-name">未选择任何文件</span>
+            <span class="file-name" id="file-name">No file selected</span>
             <button class="upload-submit" type="submit" id="upload-submit">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                开始渲染
+                Start render
             </button>
             <div class="upload-error" id="upload-error" role="alert" aria-live="polite"></div>
         </form>
 
         <div class="history-section">
-            <h2>📚 最近任务</h2>
+            <h2>📚 Recent tasks</h2>
             <div id="card-grid" class="card-grid"></div>
             <div class="pagination" id="pagination"></div>
             <script id="tasks-data" type="application/json">{{ tasks|tojson }}</script>
@@ -121,9 +121,9 @@
     </div>
 
     <script>
-    // V131: 从 bili_summary 抄的分页 + 客户端渲染 — 每页5行, 按屏幕宽度算每行卡片数
+    // V131: Pagination borrowed from bili_summary + Client-side rendering — 5 rows per page, Compute columns per row by viewport
     const ROWS_PER_PAGE = 5;
-    const STATE_LABELS = {queued:'排队中',rendering:'渲染中',complete:'已完成',failed:'失败'};
+    const STATE_LABELS = {queued:'Queued',rendering:'Rendering',complete:'Completed',failed:'Failed'};
     let allTasks = [];
     let currentPage = 1;
 
@@ -153,15 +153,15 @@
       if(sizeStr) metaHtml += '<span class="meta-size">'+escapeHtml(sizeStr)+'</span>';
       if(author) metaHtml += '<span class="meta-author">'+escapeHtml(author)+'</span>';
       var coverHtml = hasThumb
-        ? '<img class="cover" src="/tools/litematic_render/'+task.id+'/download/thumbnail" alt="'+escapeHtml(task.filename)+' 彩图正交视图" loading="lazy">'
+        ? '<img class="cover" src="/tools/litematic_render/'+task.id+'/download/thumbnail" alt="'+escapeHtml(task.filename)+' Colored orthographic view" loading="lazy">'
         : '';
       var placeholder = state==='queued'||state==='rendering'
-        ? '彩图正交视图生成中' : '暂无彩图正交视图';
+        ? 'Colored orthographic view in progress' : 'No colored orthographic view';
       var progressText = state==='queued'||state==='rendering'
-        ? '<div class="progress-text">进度 '+(task.progress||0)+'%</div>' : '';
+        ? '<div class="progress-text">Progress '+(task.progress||0)+'%</div>' : '';
       var footerActions = '';
-      if(state==='failed') footerActions = '<button class="retry" type="button">重试</button>';
-      if(state==='complete') footerActions = '<a class="open" href="/tools/litematic_render/'+task.id+'/">查看 ›</a>';
+      if(state==='failed') footerActions = '<button class="retry" type="button">Retry</button>';
+      if(state==='complete') footerActions = '<a class="open" href="/tools/litematic_render/'+task.id+'/">View ›</a>';
       var finishedTime = task.finished_at || task.created_at || 0;
       var timeStr = '';
       if(finishedTime){
@@ -169,7 +169,7 @@
         timeStr = d.toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
       }
       return '<article class="task '+state+'" data-id="'+task.id+'" style="--p:'+(task.progress||0)+'%">'+
-        '<button class="delete" type="button" aria-label="删除任务">×</button>'+
+        '<button class="delete" type="button" aria-label="Delete task">×</button>'+
         '<a class="cover-link" href="/tools/litematic_render/'+task.id+'/">'+
           '<div class="cover-frame"><div class="cover-wrap'+(hasThumb?' has-cover':'')+'">'+
             coverHtml+
@@ -246,15 +246,15 @@
       if(slice.length === 0){
         cardGrid.innerHTML = '<div class="empty">'+
           '<span class="empty-icon">📭</span>'+
-          '<div class="empty-title">还没有任务</div>'+
-          '<div class="empty-sub">先上传一个 Litematica 投影吧</div>'+
+          '<div class="empty-title">No tasks yet</div>'+
+          '<div class="empty-sub">Upload a Litematic schematic to get started</div>'+
         '</div>';
         return;
       }
       cardGrid.innerHTML = slice.map(renderCard).join('');
     }
 
-    // 初始化
+    // Init
     try{
       allTasks = JSON.parse(document.getElementById('tasks-data').textContent || '[]');
     }catch(e){allTasks = [];}
@@ -262,7 +262,7 @@
     renderPagination();
     renderCurrentPage();
 
-    // 删除 / 重试 处理 (事件委托)
+    // Delete / Retry action (Event delegation)
     document.addEventListener('click',async function(e){
       var card = e.target.closest('.task');
       if(!card) return;
@@ -270,19 +270,19 @@
       if(e.target.closest('.retry')){
         e.preventDefault();
         var r = await fetch('/api/tools/litematic_render/'+id+'/retry',{method:'POST'});
-        if(r.ok) location.reload(); else alert((await r.json()).error||'重试失败');
+        if(r.ok) location.reload(); else alert((await r.json()).error||'RetryFailed');
         return;
       }
       if(e.target.closest('.delete')){
         e.preventDefault();
-        if(!confirm('确定删除这个任务？')) return;
+        if(!confirm('Confirm delete this task?')) return;
         var r = await fetch('/api/tools/litematic_render/'+id,{method:'DELETE'});
         if(r.ok){ card.remove(); }
-        else alert((await r.json()).error||'删除失败');
+        else alert((await r.json()).error||'DeleteFailed');
       }
     });
 
-    // V128/V131: AJAX 轮询 — 进度更新 + 渲染完成刷新
+    // V128/V131: AJAX Polling — Progressupdate + Render-complete refresh
     function pollTasks(){
       var inProgress = allTasks.filter(function(t){return t.status==='rendering'||t.status==='queued';});
       if(inProgress.length === 0) return;
@@ -302,7 +302,7 @@
             changed = true;
           }
           if(state.status==='complete' || state.status==='failed'){
-            // 任务完成 — 刷一次整页看产物
+            // Task complete — Refresh whole page once for the artifacts
             setTimeout(function(){location.reload();}, 800);
           }
         });
@@ -315,7 +315,7 @@
     }
     setTimeout(pollTasks, 1500);
 
-    // 窗口 resize 重新算分页
+    // window resize recomputePagination
     var resizeTimer;
     window.addEventListener('resize', function(){
       clearTimeout(resizeTimer);
@@ -327,7 +327,7 @@
       }, 200);
     });
 
-    // 文件上传 (拖拽 + 提交)
+    // File upload (Drag + Submit)
     (function(){
       var form=document.getElementById('upload-form');
       var input=document.getElementById('litematic-input');
@@ -337,7 +337,7 @@
       if(!form||!input) return;
       function update(file){
         if(file){ fileName.textContent=file.name; fileName.classList.add('has-file'); submitBtn.classList.add('show'); }
-        else { fileName.textContent='未选择任何文件'; fileName.classList.remove('has-file'); submitBtn.classList.remove('show'); }
+        else { fileName.textContent='No file selected'; fileName.classList.remove('has-file'); submitBtn.classList.remove('show'); }
       }
       input.addEventListener('change',function(){update(input.files[0])});
       form.addEventListener('submit',async function(e){
@@ -347,15 +347,15 @@
         try{
           var response=await fetch(form.action,{method:'POST',body:new FormData(form)});
           if(response.ok){
-            // V130: 上传成功后刷新当前页 — 新 task 卡片显示出来
+            // V130: Refresh current page after successful upload — New task card appears
             location.reload();
             return;
           }
           var result=await response.json().catch(function(){return {}});
-          uploadError.textContent=result.error||'上传失败，请稍后重试';
+          uploadError.textContent=result.error||'Upload failed, please try again';
           uploadError.classList.add('show');
         }catch(error){
-          uploadError.textContent='上传失败，请检查网络后重试';
+          uploadError.textContent='Upload failed, please check your network';
           uploadError.classList.add('show');
         }finally{
           submitBtn.disabled=false;

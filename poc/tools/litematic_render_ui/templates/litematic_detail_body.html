@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-    <title>{{metadata.name}} · 投影详情 · Hermes</title>
+    <title>{{metadata.name}} · Schematic Detail · Hermes</title>
     <link rel="icon" href="/favicon.png">
     <link rel="stylesheet" href="/css/morandi">
     <style>
@@ -86,90 +86,90 @@
     <div class="container">
         <div class="header">
             <div class="header-left">
-                <h1><a href="/tools/litematic_render/" class="header-link">🧱 投影渲染</a></h1>
+                <h1><a href="/tools/litematic_render/" class="header-link">🧱 Litematic Render</a></h1>
             </div>
             <div class="header-right">
-                <a href="/tools" class="back-arrow" title="返回工具" aria-label="返回工具">
+                <a href="/tools" class="back-arrow" title="Back to Tools" aria-label="Back to Tools">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
                 </a>
             </div>
         </div>
 
         {% if task.error %}<div class="error">{{task.error}}</div>{% endif %}
-        {% if metadata.metadata_error %}<div class="error">元数据读取失败：{{metadata.metadata_error}}</div>{% endif %}
+        {% if metadata.metadata_error %}<div class="error">metadata readFailed：{{metadata.metadata_error}}</div>{% endif %}
 
         <div class="card-grid">
             <section class="card summary">
                 <div class="summary-main">
                     <h1 class="project-name">{{task.filename}}</h1>
                     <div class="meta-inline">
-                        <span><b>尺寸</b>{{metadata.dimensions}}</span>
+                        <span><b>Dimensions</b>{{metadata.dimensions}}</span>
                         <span class="sep">·</span>
-                        <span><b>版本</b>{{metadata.version}}</span>
+                        <span><b>Version</b>{{metadata.version}}</span>
                         <span class="sep">·</span>
-                        <span><b>作者</b>{{metadata.author}}</span>
+                        <span><b>Author</b>{{metadata.author}}</span>
                         <span class="sep">·</span>
-                        <span><b>大小</b>{{task.size|filesizeformat}}</span>
+                        <span><b>Size</b>{{task.size|filesizeformat}}</span>
                     </div>
                 </div>
                 <div class="download-actions">
-                    <a class="source-download" href="/tools/litematic_render/{{task.id}}/source">下载 .litematic</a>
-                    <a class="source-download" href="/tools/litematic_render/{{task.id}}/download/zip">下载压缩包</a>
+                    <a class="source-download" href="/tools/litematic_render/{{task.id}}/source">Download .litematic</a>
+                    <a class="source-download" href="/tools/litematic_render/{{task.id}}/download/zip">Downloadarchive</a>
                 </div>
             </section>
             <section class="card">
                 <div class="viewer-header">
-                    <span class="viewer-title">工程制图</span>
-                    <label class="toggle-switch" title="切换材料列表显示">
+                    <span class="viewer-title">Engineering sheet</span>
+                    <label class="toggle-switch" title="Toggle materials list">
                         <input type="checkbox" id="materials-toggle">
                         <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                        <span class="toggle-label">材料列表</span>
+                        <span class="toggle-label">Materials list</span>
                     </label>
                 </div>
                 <div class="render-progress" id="render-progress" {% if task.status not in ['queued','rendering'] %}hidden{% endif %}>
                     <div class="progress-bar"><div class="progress-fill" id="progress-fill" style="width:{{task.progress}}%"></div></div>
-                    <div class="progress-text" id="progress-text">{{'排队中' if task.status == 'queued' else '渲染中'}} {{task.progress}}%</div>
+                    <div class="progress-text" id="progress-text">{{'Queued' if task.status == 'queued' else 'Rendering'}} {{task.progress}}%</div>
                 </div>
                 <div class="render-log" id="render-log" {% if task.status not in ['queued','rendering'] %}hidden{% endif %}><pre id="log-content"></pre></div>
                 <div class="viewer">
                     <img id="drawing" {% if task.outputs.paper %}src="/tools/litematic_render/{{task.id}}/download/paper"{% else %}hidden{% endif %} alt="" role="presentation">
-                    <button class="icon-btn prev" type="button" aria-label="上一张" {% if not task.outputs.paper %}hidden{% endif %}>‹</button>
-                    <button class="icon-btn next" type="button" aria-label="下一张" {% if not task.outputs.paper %}hidden{% endif %}>›</button>
-                    <a id="drawing-download" class="icon-btn drawing-download" {% if task.outputs.paper %}href="/tools/litematic_render/{{task.id}}/download/paper"{% else %}hidden{% endif %} download aria-label="下载图片">↓</a>
-                    <span id="viewer-status" class="viewer-status" {% if task.outputs.paper %}hidden{% endif %}>渲染中，完成后自动显示</span>
-                    <span class="viewer-hint">点击图片放大</span>
+                    <button class="icon-btn prev" type="button" aria-label="Previous" {% if not task.outputs.paper %}hidden{% endif %}>‹</button>
+                    <button class="icon-btn next" type="button" aria-label="Next" {% if not task.outputs.paper %}hidden{% endif %}>›</button>
+                    <a id="drawing-download" class="icon-btn drawing-download" {% if task.outputs.paper %}href="/tools/litematic_render/{{task.id}}/download/paper"{% else %}hidden{% endif %} download aria-label="Download image">↓</a>
+                    <span id="viewer-status" class="viewer-status" {% if task.outputs.paper %}hidden{% endif %}>Rendering — will display when complete</span>
+                    <span class="viewer-hint">Click image to enlarge</span>
                 </div>
             </section>
             <section class="card">
                 <div class="downloads-grid">
                     {% if task.outputs.workbook %}
                     <a class="workbook" href="/tools/litematic_render/{{task.id}}/download/workbook" download>
-                        <span class="excel-icon" title="XLSX 备货清单">▦</span>
+                        <span class="excel-icon" title="XLSX Materials workbook">▦</span>
                         <span class="workbook-main">
                             <span class="workbook-name">{{task.outputs.workbook}}</span>
-                            <span class="workbook-meta">{{materials|length}} 种材料 · XLSX</span>
+                            <span class="workbook-meta">{{materials|length}} block types · XLSX</span>
                         </span>
                     </a>
                     {% endif %}
                     {% if task.outputs.materials_image %}
                     <a class="workbook" href="/tools/litematic_render/{{task.id}}/download/materials_image" download>
-                        <span class="image-icon" title="材料列表图 (PNG)">▣</span>
+                        <span class="image-icon" title="Materials listimage (PNG)">▣</span>
                         <span class="workbook-main">
                             <span class="workbook-name">{{task.outputs.materials_image}}</span>
-                            <span class="workbook-meta">{{materials|length}} 种材料 · PNG</span>
+                            <span class="workbook-meta">{{materials|length}} block types · PNG</span>
                         </span>
                     </a>
                     {% endif %}
                     {% if not task.outputs.workbook and not task.outputs.materials_image %}
-                    <span class="empty">材料清单生成中</span>
+                    <span class="empty">Materials workbook in progress</span>
                     {% endif %}
                 </div>
             </section>
         </div>
     </div>
 
-    <div id="image-modal" class="image-modal" aria-hidden="true" role="dialog" aria-label="工程制图放大预览">
-        <button class="image-modal-close" type="button" aria-label="关闭">×</button>
+    <div id="image-modal" class="image-modal" aria-hidden="true" role="dialog" aria-label="Engineering sheet enlarged preview">
+        <button class="image-modal-close" type="button" aria-label="Close">×</button>
         <img id="image-modal-img" src="" alt="" role="presentation" draggable="false">
     </div>
 
@@ -202,7 +202,7 @@
         img.hidden=true;
         img.removeAttribute('src');
         if(dl)dl.hidden=true;
-        if(status){status.textContent=currentMaterials?'暂无带材料列表的图片':'暂无无材料列表的图片';status.hidden=false}
+        if(status){status.textContent=currentMaterials?'no image with materials list':'no image without materials list';status.hidden=false}
         return;
       }
       var targetKind=kindForView(currentView);
@@ -285,26 +285,26 @@
         var state=results[0],log=results[1];
         task.status=state.status;task.outputs=state.outputs||{};
         var progress=log.progress===undefined?(state.progress||0):log.progress;
-        // 限制 0-100 防 render.log 解析抖动导致进度条反复跳
+        // Cap 0-100 Cap 0-100 to stop render.log jitter causing the progress bar from bouncing
         progress=Math.max(0,Math.min(100,progress));
-        // 进度条宽度单调前进:如果新宽度低于当前,保留当前
+        // Progress bar monotonic — keep:if new width is lower, keep current
         var lastProgress=progressFill._lastProgress||0;
         var barWidth=progress<lastProgress?lastProgress:progress;
         if(progress>=lastProgress){progressFill._lastProgress=progress}
         progressFill.style.width=barWidth+'%';
-        // step 字符串空时不显示 0%(避免没 log 输出时显示 0%)
-        if(!log.step){progressText.textContent='渲染中'}
+        // step Hide empty strings 0%(Avoid showing when log is empty 0%)
+        if(!log.step){progressText.textContent='Rendering'}
         else{progressText.textContent=log.step+' '+progress+'%'}
         if(log.lines&&log.lines.length){logContent.textContent=log.lines.join('\n');renderLog.scrollTop=renderLog.scrollHeight}
         if(state.status==='complete'){
           polling=false;
-          // 整个页面重渲染:备货清单卡片 / 工程制图切换 / paper 下载按钮等
-          // 都是 Jinja2 根据 task.outputs 写好的,DOM JS 更新不了,必须 reload。
+          // whole page re-render:Materials workbookcard / Engineering sheettoggle / paper Downloadbuttons etc.
+          // All Jinja2-rendered from task.outputs,DOM JS Can't update,must reload。
           location.reload();
           return;
         }
         if(state.status==='failed'){
-          polling=false;progressText.textContent=state.error||'渲染失败';
+          polling=false;progressText.textContent=state.error||'Render failed';
           return;
         }
         setTimeout(pollStatus,1500);

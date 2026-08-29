@@ -17,11 +17,10 @@ import java.util.zip.ZipOutputStream;
 /** Fills material data into the owner's workbook without rebuilding its design. */
 final class MaterialWorkbookWriter {
     /**
-     * Owner-workbook template — historically read from a hardcoded
-     * `/home/rsegordon/.hermes/cache/documents/doc_*` path. Now sourced
-     * from the build classpath: production config under
-     * `src/main/resources/`, tests shadow with `src/test/resources/`.
-     * See LOCALIZE.md Bucket B-2.
+     * Owner-workbook template — historically read from a per-author
+     * absolute filesystem path. Now sourced from the build classpath:
+     * production config under `src/main/resources/`, tests shadow
+     * with `src/test/resources/`. See LOCALIZE.md Bucket B-2.
      */
     private static final String OWNER_TEMPLATE_RESOURCE =
             "io/github/rsegordon/litematic_render/owner_workbook_template.xlsx";
