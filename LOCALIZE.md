@@ -20,7 +20,7 @@ aesthetic**.
 
 ### A-1 `LITEMATIC_RENDER_JAVA_HOME` default value in `app.py` / 默认 JDK 路径
 
-- **File / 文件**: `poc/tools/litematic_render_ui/app.py`, around L29.
+- **File / 文件**: `poc/tools/litematic_render_ui/app.py`, around L25.
 - **Current / 当前**:
 
   ```python
@@ -79,11 +79,25 @@ aesthetic**.
 
 ### B-1 Java package `com.rsegordon.poc` / Java 包名
 
-- **Files**: every `.java` under `poc/src/`. ~25 files, all start with
-  `package com.rsegordon.poc;`. The reflect call
-  `Class.forName("com.rsegordon.poc.OffscreenRenderer$View")` in
-  `OffscreenRendererChunkCoverageTest.java:57` must be updated
-  correspondingly.
+- **Files**: every `.java` under `poc/src/`. 13 source files declare
+  `package com.rsegordon.poc;` (7 in `src/main/java/`, 11 in
+  `src/test/java/`, plus 7 `mixin/*.java` declaring the
+  `com.rsegordon.poc.mixin` sub-package). Plus:
+
+  - `poc/src/main/resources/fabric.mod.json:7` — entrypoint string
+    `"com.rsegordon.poc.LitematicRenderMod"`. **Must** be renamed
+    alongside the Java package, or Fabric Loader will fail to find the
+    mod entry.
+  - `poc/src/main/resources/litematic_render_poc.mixins.json:3` —
+    `"package": "com.rsegordon.poc.mixin"`. Same: rename
+    together with B-1, or the mixin framework will not discover the
+    mixin classes.
+
+- **Reflection call site** (renamed-package step must update this too):
+
+  - `OffscreenRendererChunkCoverageTest.java:57`:
+    `Class.forName("com.rsegordon.poc.OffscreenRenderer$View")`
+
 - **Action / 改法**: pick a new package and rename across the tree:
 
   ```bash
@@ -115,7 +129,27 @@ aesthetic**.
   `doc_eebd8c239945_*` (the fixture is the output of a previous run of
   `MaterialWorkbookWriter` against `刷怪塔材料清单.litematic`).
 
-### B-3 `OffscreenRendererWorldCreationTest` source-relative path / src 相对路径
+### B-3 V1 historical utility scripts contain hardcoded author paths / V1 早期脚本含硬编码路径
+
+- **File / 文件**: `convert_entity_models.py:21`.
+- **Current / 当前**:
+
+  ```python
+  DST_DIR = Path('/home/rsegordon/.hermes/scripts/litematic_render/client_assets/assets/minecraft/models/entity')
+  ```
+
+- **Action / 改法**: replace with a path relative to the repo root:
+
+  ```python
+  from pathlib import Path
+  DST_DIR = Path(__file__).resolve().parent / "client_assets/assets/minecraft/models/entity"
+  ```
+
+  Or just delete this file — it was a one-time V1 debug helper; the
+  modern renderer (`OffscreenRenderer`) extracts its own blockstate data
+  at runtime from `client.jar`.
+
+### B-4 `OffscreenRendererWorldCreationTest` source-relative path / src 相对路径
 
 - **File / 文件**: `poc/src/test/java/com/rsegordon/poc/OffscreenRendererWorldCreationTest.java:12`.
 - **Current / 当前**: hardcoded `"src/main/java/com/rsegordon/poc/OffscreenRenderer.java"`.
@@ -131,6 +165,20 @@ aesthetic**.
   (after the round of pushes). Renaming the GitHub repo, or moving to a
   different org, would cascade into the local `origin` URL — re-point
   with `git remote set-url origin <new-url>`.
+
+### C-3 Historical V-plan markdown files reference author paths / 历史 V 字头 md 含作者绝对路径
+
+- **Files**: `V53_POC_plan.md`, `V54_POC_RESURRECT_REPORT.md`,
+  `V55_Z_FLIP_FIX.md`, `V62_DYNAMIC_CAMERA.md`,
+  and other `V*.md` files in repo root.
+- **What they're for / 作用**: keep-alive historical investigation
+  notes from the V53-V68 era. They are committed snapshots, not
+  working documents.
+- **Decision / 取舍**: **Leave them in git history unchanged.** Author
+  paths here are historical fact, not actionable code. If publishing
+  privately raises concerns, prune these specific files in a single
+  git-filter-repo pass — but understand that rewrites commit history
+  and forces every collaborator to re-clone.
 
 ### C-2 Group + package-name parity / group 与包名一致
 
@@ -170,6 +218,9 @@ git grep -nE '"(/home/|/Users/|C:\\)" -- 'poc/src/test/**/*.java'
 - [ ] B-3: source-relative test paths point at the renamed package.
 - [ ] C-1: GitHub repo renamed + `origin` re-pointed (if applicable).
 - [ ] C-2: gradle group & package aligned (if desired).
+- [ ] B-1 mixin sub-files: `fabric.mod.json` entrypoint + `litematic_render_poc.mixins.json` package string updated.
+- [ ] Reflection call sites: `OffscreenRendererChunkCoverageTest.java:57` `Class.forName` updated.
+- [ ] C-3 plan: decide whether to leave V53/V54/V55/V62 etc. as-is or rewrite history.
 - [ ] `./gradlew test` passes on the new owner's hardware.
 - [ ] A real litematic is uploaded through the new UI endpoint and
        produces all four artifacts end-to-end.

@@ -21,6 +21,13 @@ rendered through the V153 6-view pipeline.*
 > **本仓基于老板 (`RSEGordon`) 个人开发环境配置,与具体机器 / 路径 / 用户强绑定。**
 > **如果切换为公开仓,或换机器运行,需要先做本地化。请见 [`LOCALIZE.md`](./LOCALIZE.md) 中的清单。**
 >
+> ⚠️ **DO NOT flip the repo to `public` visibility until you have walked through Bucket A in LOCALIZE.md.**
+> Until then, the working tree still contains author-specific absolute paths in code
+> (`poc/tools/litematic_render_ui/app.py`), Java test fixtures
+> (`MaterialWorkbookWriter.java:20`), and historical V-plan markdown files
+> (`V53_POC_plan.md`, `V54_POC_RESURRECT_REPORT.md`, etc.). Those will leak
+> the author's home directory layout to anyone with read access.
+>
 > **This repository is hardwired to author `RSEGordon`'s personal
 > development environment.** Before publishing publicly, running on a
 > different machine, or merging into a different owner's fork, see
