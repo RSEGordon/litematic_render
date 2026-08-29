@@ -1,15 +1,53 @@
-# Litematic Render
+# Litematic Render / Minecraft Schematic 6 视图投影渲染器
 
-Render any Minecraft schematic (`.litematic`) into a 6-axis axonometric
-projection plus a complete materials workbook — directly from a real vanilla
-Minecraft client, with pixel-level blockstate fidelity.
+> Render any Minecraft schematic (`.litematic`) into a 6-axis axonometric
+> projection plus a complete materials workbook — directly from a real
+> vanilla Minecraft client, with pixel-level blockstate fidelity.
+>
+> 用真实的原版 Minecraft 客户端渲染 `.litematic` 投影文件,生成 6 轴轴测投影
+> 图 + 完整材料清单工作簿。逐像素 blockstate 保真,不近似、不偷工。
 
 ![composite preview](docs/preview-composite.png)
-*(preview placeholder — dropped into `docs/` before publishing)*
 
-## What it does
+*Composite render of `【单区块】海泡菜 1470k` — a sea-pickle farm schematic,
+rendered through the V153 6-view pipeline.*
 
-Given a `.litematic`, the tool produces four artifacts per task:
+*海泡菜 1470k 单区块投影的 V153 6 视图合成图样张。*
+
+---
+
+## ⚠️ 本地化提示 / Localization Notice
+
+> **本仓基于老板 (`RSEGordon`) 个人开发环境配置,与具体机器 / 路径 / 用户强绑定。**
+> **如果切换为公开仓,或换机器运行,需要先做本地化。请见 [`LOCALIZE.md`](./LOCALIZE.md) 中的清单。**
+>
+> **This repository is hardwired to author `RSEGordon`'s personal
+> development environment.** Before publishing publicly, running on a
+> different machine, or merging into a different owner's fork, see
+> [`LOCALIZE.md`](./LOCALIZE.md) for the items that need to change.
+
+---
+
+## 📚 目录 / Contents
+
+1. [What it does / 工具产出](#-what-it-does--工具产出)
+2. [Why this exists / 为什么做](#-why-this-exists--为什么做)
+3. [Quick start / 快速上手](#-quick-start--快速上手)
+4. [Requirements / 运行环境](#-requirements--运行环境)
+5. [Architecture / 架构](#-architecture--架构)
+6. [Render pipeline / 渲染流程](#-render-pipeline--渲染流程)
+7. [Configuration / 配置](#-configuration--配置)
+8. [Tests / 测试](#-tests--测试)
+9. [History / 版本历史](#-history--版本历史)
+10. [Repo layout / 仓库结构](#-repo-layout--仓库结构)
+11. [License / 许可证](#-license--许可证)
+12. [Localization / 本地化](#-localization--本地化)
+
+---
+
+## 📦 What it does / 工具产出
+
+Given a `.litematic` file, the tool produces four artifacts per task:
 
 | Artifact | Description |
 |---|---|
@@ -18,52 +56,108 @@ Given a `.litematic`, the tool produces four artifacts per task:
 | **Materials XLSX** | Same data in workbook form, suitable for take-off / BOQ. Owner (the litematic's original author) gets a separate sheet. |
 | **Render log** | Per-task stdout/stderr from the rendering Minecraft client — useful for debugging parity or capture stalls. |
 
-## Why this exists
+每个 `.litematic` 任务产出以下四件:
 
-Existing tools (Litematica, 3dLitematica) render in-editor; they require a
-human at the keyboard and produce screenshots, not images you can drop into a
-build sheet. This project runs Minecraft headlessly through Fabric Loom,
-loads the schematic into an isolated `Superflat the_void` world, captures
-six orthographic-style frames, and composites them — without ever opening
-the UI.
+| 产物 | 说明 |
+|---|---|
+| **合成 PNG** | 主视图 + 5 个侧视图,以 bbox 的主角点为锚。6 视图排版成一张图。 |
+| **材料独立 PNG** | `materials_only.png` 独立文件。两列两端对齐排版,列出每种方块、数量、占比。V153 起字号 + 分辨率双倍。 |
+| **材料 XLSX** | 同数据的工作簿格式,可直接做 BOQ。原作者(owner)另起独立 sheet。 |
+| **渲染日志** | 每个任务对应的 Minecraft 客户端 stdout/stderr。便于排查 parity / 捕获 stall。 |
+
+---
+
+## 🎯 Why this exists / 为什么做
+
+**EN.** Existing tools (Litematica, 3dLitematica) render in-editor; they
+require a human at the keyboard and produce screenshots, not images you can
+drop into a build sheet. This project runs Minecraft headlessly through
+Fabric Loom, loads the schematic into an isolated `Superflat the_void`
+world, captures six orthographic-style frames, and composites them —
+without ever opening the UI.
 
 The fidelity matters: blockstates are rendered by the same code path that
 ships in vanilla, so fence rotations, redstone cross shapes, and trapdoor
-orientations look exactly as they would in-game. No re-implementation, no
-text approximations.
+orientations look exactly as they would in-game. No re-implementation,
+no text approximations.
 
-## Quick start
+**中文.** 现有工具 (Litematica / 3dLitematica) 必须在编辑器内、手动操作、截屏。
+本项目通过 Fabric Loom 引导 Minecraft 无头模式,把投影加载到独立
+`Superflat the_void` 世界,捕获六个正交视图,合成到一起 —— 全程不开 UI。
+
+保真度是核心。方块状态由原版 MC 同款渲染管线输出,栅栏朝向、红石十字、
+活板门方向全部与游戏内一致。不重写、不近似。
+
+---
+
+## 🚀 Quick start / 快速上手
+
+**EN.**
 
 ```bash
+# 1. Compile the rendering client (needs JDK 25, 6 GB heap)
 cd poc
 ./gradlew :runClient -Pargs="--render FILE.litematic --out OUT_DIR"
-```
 
-That kicks off the rendering client. While it runs, the Flask UI:
-
-```bash
+# 2. (optional) Spin up the Flask UI
 cd poc/tools/litematic_render_ui
 python3 app.py            # listens on :19995
 ```
 
-Upload a `.litematic` through the web UI — the tool records a task, dispatches
-it to the renderer, and writes the four artifacts into
-`LITEMATIC_DIR/<task-id>/`.
+Upload a `.litematic` through the web UI (or call the renderer CLI
+directly). The tool records a task, dispatches it to the renderer, and
+writes the four artifacts into the task directory.
 
-## Requirements
+**中文.**
 
-- **JDK 25** (`org.gradle.jvmargs=-Xmx6g` requires 6 GB heap for the
-  render client; the production renderer enforces this)
-- **Minecraft 1.26.2** (snapshot) — `minecraft_version=26.2` in
-  `gradle.properties`
-- **Fabric Loader 0.19.3** + **Fabric API 0.158.0+26.2**
-- **Python 3.10+** with `flask`, `nbtlib` (UI side)
-- **Linux + Xvfb** OR **headless GPU** — the renderer spins up an offscreen
-  Minecraft client per task, killed on completion
+```bash
+# 1. 编译渲染客户端 (需 JDK 25, 6 GB 堆)
+cd poc
+./gradlew :runClient -Pargs="--render FILE.litematic --out OUT_DIR"
 
-Set `LITEMATIC_RENDER_JAVA_HOME` if your JDK is not on PATH.
+# 2. (可选) 启动 Flask UI
+cd poc/tools/litematic_render_ui
+python3 app.py            # 监听 :19995
+```
 
-## Architecture
+通过网页 UI 上传 `.litematic` (或直接调渲染命令行)。工具记录任务、派发
+渲染、把四件产物写到任务目录。
+
+---
+
+## 🛠 Requirements / 运行环境
+
+**EN.**
+
+- **JDK 25** — `org.gradle.jvmargs=-Xmx6g` requires 6 GB heap for the
+  rendering client.
+- **Minecraft 26.2** (snapshot) — `minecraft_version=26.2` in
+  `gradle.properties`.
+- **Fabric Loader 0.19.3** + **Fabric API 0.158.0+26.2**.
+- **Python 3.10+** with `flask`, `nbtlib` (UI side).
+- **Linux + Xvfb** OR a **headless GPU** — the renderer spins up an
+  offscreen Minecraft client per task, killed on completion.
+
+Set `LITEMATIC_RENDER_JAVA_HOME` if your JDK is not on `PATH`.
+On production hosts the renderer is killed and restarted per task to
+avoid state leakage between litematics.
+
+**中文.**
+
+- **JDK 25** —— `org.gradle.jvmargs=-Xmx6g`,渲染客户端需 6 GB 堆。
+- **Minecraft 26.2** (snapshot) —— 见 `gradle.properties`。
+- **Fabric Loader 0.19.3** + **Fabric API 0.158.0+26.2**。
+- **Python 3.10+** —— UI 端依赖 `flask`、`nbtlib`。
+- **Linux + Xvfb** 或 **无头 GPU** —— 每个任务启一个离屏 MC,完成后退出。
+
+JDK 不在 `PATH` 上时,设置 `LITEMATIC_RENDER_JAVA_HOME`。
+生产环境渲染器每次任务后强杀重启,避免状态泄漏。
+
+---
+
+## 🏛 Architecture / 架构
+
+**EN.**
 
 ```
 poc/
@@ -71,61 +165,106 @@ poc/
 │   ├── LitematicRenderCommand.java    # /gradlew runClient entry point
 │   ├── LitematicRenderMod.java        # mod entry; wires the renderer
 │   ├── OffscreenRenderer.java         # capture + composite + materials walk
-│   ├── MaterialWorkbookWriter.java    # XLSX output
+│   ├── MaterialWorkbookWriter.java    # XLSX output  ⚠ LOCALIZE item C-2
 │   ├── OutputArchiveWriter.java       # tar.gz bundle of all artifacts
 │   ├── BackgroundPass.java            # paper background fill pass
 │   └── mixin/                         # fabric mixins for off-screen capture
-├── src/test/java/com/rsegordon/poc/
+├── src/test/java/com/rsegordon/poc/   # ⚠ LOCALIZE item C-2 (Java package)
 │   ├── OffscreenRendererEngineeringSheetLayoutTest.java
 │   ├── OffscreenRendererMaterialsLayoutTest.java
 │   ├── OffscreenRendererChunkCoverageTest.java
 │   ├── OffscreenRendererPrincipalProjectionTest.java
-│   ├── OffscreenRendererWorldCreationTest.java
+│   ├── OffscreenRendererWorldCreationTest.java       # ⚠ hardcoded src/ path
 │   ├── OffscreenRendererVoidTerrainTest.java
 │   ├── OffscreenRendererPlatformClearTest.java
 │   ├── OffscreenRendererProgressTest.java
 │   ├── OffscreenRendererRenderReadyTest.java
-│   ├── MaterialWorkbookWriterTest.java
+│   ├── MaterialWorkbookWriterTest.java               # ⚠ hardcoded fixtures
 │   ├── OutputArchiveWriterTest.java
 │   └── SingleViewTransparencyTest.java
-└── tools/litematic_render_ui/
-    ├── app.py                          # Flask blueprint
+└── tools/litematic_render_ui/                         # ⚠ LOCALIZE item A-3
+    ├── app.py                          # Flask blueprint (硬编码路径)
     └── templates/                      # 4 Jinja2 templates
 ```
 
-### Render pipeline (one task)
+**中文.**
 
-1. **Bootstrap**:  the Flask UI writes a `.litematic` into
+```
+poc/
+├── src/main/java/com/rsegordon/poc/    # ⚠ LOCALIZE C-2 (包名)
+│   ├── LitematicRenderCommand.java    # /gradlew runClient 入口
+│   ├── LitematicRenderMod.java        # mod 入口,装配渲染器
+│   ├── OffscreenRenderer.java         # 捕获 + 合成 + 材料遍历
+│   ├── MaterialWorkbookWriter.java    # XLSX 输出  ⚠ 本地化项 C-2
+│   ├── OutputArchiveWriter.java       # tar.gz 打包所有产物
+│   ├── BackgroundPass.java            # paper 底色填充 pass
+│   └── mixin/                         # Fabric mixins,离屏捕获
+├── src/test/java/com/rsegordon/poc/   # ⚠ 本地化项 C-2 (Java 包名)
+│   ├── ...11 个 JUnit 5 测试...        # 部分测试含硬编码路径 ⚠ C-1
+└── tools/litematic_render_ui/         # ⚠ 本地化项 A-3 (硬编码路径)
+    ├── app.py                          # Flask 蓝图 (含硬编码绝对路径)
+    └── templates/                      # 4 个 Jinja2 模板
+```
+
+---
+
+## ⚙️ Render pipeline / 渲染流程
+
+**EN.** Each task follows eight steps:
+
+1. **Bootstrap** — Flask UI writes the `.litematic` into
    `LITEMATIC_DIR/<task-id>/raw/` and records the task in
    `LITEMATIC_DIR/tasks.json`.
-2. **Spawn renderer**:  `LITEMATIC_RENDER_DISTANCE_CHUNKS` (default 32)
-   controls chunk-coverage; `LITEMATIC_RENDER_DISTANCE_SAFETY_CHUNKS` (default
-   2) extends the area slightly to clip edges cleanly.
-3. **Isolated world**:  the renderer creates a brand-new
-   `Superflat the_void` world per task (`RENDER_WORLD_PREFIX = "LitematicRender_"`),
-   preventing spawn-platform leakage from a previous task.
-4. **Load schematic**:  the litematic is pasted at world spawn, then the
+2. **Spawn renderer** — `LITEMATIC_RENDER_DISTANCE_CHUNKS` (default 32)
+   controls chunk coverage; `LITEMATIC_RENDER_DISTANCE_SAFETY_CHUNKS`
+   (default 2) extends the area slightly to clip edges cleanly.
+3. **Isolated world** — the renderer creates a brand-new
+   `Superflat the_void` world per task (`RENDER_WORLD_PREFIX =
+   "LitematicRender_"`), preventing spawn-platform leakage from a previous
+   task.
+4. **Load schematic** — the litematic is pasted at world spawn, then the
    renderer walks the bounding box.
-5. **Six-view capture**:  for each principal corner, the renderer drives an
-   orthographic frame, captures the framebuffer, and composites.
-6. **Materials walk**:  single pass over the loaded region; aggregates counts,
-   joins back to blockstate IDs through the `client_assets/` JSON map.
-7. **Write artifacts**:  composite PNG, materials-only PNG, XLSX workbook,
+5. **Six-view capture** — for each principal corner, the renderer drives
+   an orthographic frame, captures the framebuffer, and composites.
+6. **Materials walk** — single pass over the loaded region; aggregates
+   counts, joins back to blockstate IDs through the `client_assets/` JSON
+   map.
+7. **Write artifacts** — composite PNG, materials-only PNG, XLSX workbook,
    and a tar.gz archive; written through `OutputArchiveWriter`.
-8. **Cleanup**:  the temp world is deleted; the JLS reports
+8. **Cleanup** — the temp world is deleted; the JLS reports
    `cleaned temporary render world /.../LitematicRender_<uuid>`.
 
-## Configuration
+**中文.** 每个任务分八步:
+
+1. **引导** —— Flask UI 把 `.litematic` 写到 `LITEMATIC_DIR/<task-id>/raw/`,
+   并在 `LITEMATIC_DIR/tasks.json` 记录任务。
+2. **启动渲染器** —— `LITEMATIC_RENDER_DISTANCE_CHUNKS` (默认 32) 控制区块
+   覆盖范围;`LITEMATIC_RENDER_DISTANCE_SAFETY_CHUNKS` (默认 2) 多渲一圈保证
+   边缘裁切干净。
+3. **隔离世界** —— 每个任务创建一个全新 `Superflat the_void` 世界
+   (`RENDER_WORLD_PREFIX = "LitematicRender_"`),避免上次任务 spawn 平台泄漏。
+4. **加载投影** —— 投影 paste 到世界出生点,渲染器走遍 bbox。
+5. **6 视图捕获** —— 每个主角点驱动一个正交帧、捕获 framebuffer、合成。
+6. **材料遍历** —— 单次遍历加载区域,统计数量,通过 `client_assets/` JSON
+   map 关联回 blockstate ID。
+7. **写产物** —— 合成 PNG、独立材料 PNG、XLSX 工作簿、tar.gz 归档,由
+   `OutputArchiveWriter` 输出。
+8. **清理** —— 临时世界被删除,日志显示 `cleaned temporary render world
+   /.../LitematicRender_<uuid>`。
+
+---
+
+## 🔧 Configuration / 配置
 
 ### Environment variables
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LITEMATIC_RENDER_JAVA_HOME` | `/opt/java/jdk-25.0.1` | JDK location for the renderer. |
+| `LITEMATIC_RENDER_JAVA_HOME` | `/opt/java/jdk-25.0.1` ⚠ LOCALIZE A-1 | JDK location for the renderer. |
 | `LITEMATIC_RENDER_DISTANCE_CHUNKS` | `32` | chunk radius covered per task. |
-| `LITEMATIC_RENDER_DISTANCE_SAFETY_CHUNKS` | `2` | extra chunks rendered for safe edge clipping. |
+| `LITEMATIC_RENDER_DISTANCE_SAFETY_CHUNKS` | `2` | extra chunks for safe edge clipping. |
 
-### `gradle.properties`
+### `poc/gradle.properties`
 
 | Key | Value | Note |
 |---|---|---|
@@ -134,43 +273,89 @@ poc/
 | `fabric_version` | `0.158.0+26.2` | Fabric API. |
 | `org.gradle.jvmargs` | `-Xmx6g` | gradle daemon needs 6 GB. |
 
-## Tests
+---
+
+## 🧪 Tests / 测试
+
+**EN.**
 
 ```bash
 cd poc
 ./gradlew test
 ```
 
-Eleven JUnit 5 suites cover layout parity, principal projection alignment,
-the isolated-the-void world creation, the spawn-platform-clear behavior,
-chunk coverage, progress reporting, and the XLSX / archive writers. They
-run headlessly — no Minecraft client is booted during tests.
+Eleven JUnit 5 suites cover layout parity, principal projection
+alignment, the isolated-the-void world creation, the spawn-platform-clear
+behavior, chunk coverage, progress reporting, and the XLSX / archive
+writers. They run headlessly — no Minecraft client is booted during
+tests.
 
-## History
+> Note: a couple of tests rely on fixture XLSX paths under
+> `/home/rsegordon/.hermes/cache/documents/` — see LOCALIZE C-1.
 
-The renderer is the result of ~150 incremental versions across three
-months (V30 → V153). Major milestones:
+**中文.**
 
-- **V132**: replaced the size cap with a camera-distance render limit.
-- **V133**: materials workbook accepts any number of rows.
-- **V134**: forced the render world to a vanilla `the_void` superflat.
-- **V135**: cleared the spawn-protection platform after the void-world creation.
-- **V136**: isolated temp render worlds and validated real chunk coverage.
-- **V138**: derived principal frames from the camera basis.
-- **V139**: unified the engineering layout and stabilized parity.
-- **V140**: stabilized capture, axon layout, and progress UI.
-- **V141**: constrained axon views to principal corner slots.
-- **V142**: anchored axons + scaled sheet UI.
-- **V150**: 6-view composite + orphan sweep + PAPER_COLOR fullbright toggle.
-- **V151**: standalone `materials_only.png` (justified columns).
-- **V152**: dual download buttons on the materials card (XLSX + PNG).
-- **V153**: 2x font + 2x resolution via `Graphics2D.scale(2,2)`.
+```bash
+cd poc
+./gradlew test
+```
+
+11 个 JUnit 5 测试套件,覆盖:布局 parity、主角投影对齐、独立 the_void
+世界创建、spawn 平台清除、区块覆盖、进度上报、XLSX / 归档写入器。无头
+执行,测试时不启动 MC 客户端。
+
+> 注:有少量测试依赖 `/home/rsegordon/.hermes/cache/documents/` 下的
+> fixture XLSX 路径,见 LOCALIZE C-1。
+
+---
+
+## 🕓 History / 版本历史
+
+**EN.** The renderer is the result of ~150 incremental versions across
+three months (V30 → V153). Major milestones:
+
+- **V132** — replaced the size cap with a camera-distance render limit.
+- **V133** — materials workbook accepts any number of rows.
+- **V134** — forced the render world to a vanilla `the_void` superflat.
+- **V135** — cleared the spawn-protection platform after the void-world creation.
+- **V136** — isolated temp render worlds and validated real chunk coverage.
+- **V138** — derived principal frames from the camera basis.
+- **V139** — unified the engineering layout and stabilized parity.
+- **V140** — stabilized capture, axon layout, and progress UI.
+- **V141** — constrained axon views to principal corner slots.
+- **V142** — anchored axons + scaled sheet UI.
+- **V150** — 6-view composite + orphan sweep + PAPER_COLOR fullbright toggle.
+- **V151** — standalone `materials_only.png` (justified columns).
+- **V152** — dual download buttons on the materials card (XLSX + PNG).
+- **V153** — 2x font + 2x resolution via `Graphics2D.scale(2,2)`.
 
 The full iterative log lives in the commit history; early `V30`-`V90`
 versions are simpler render prototypes kept on the `master` branch for
 traceability.
 
-## Repo layout (root)
+**中文.** 渲染器从 V30 一路演化到 V153,约 150 个迭代版本。主要里程碑:
+
+- **V132** —— 用相机距离限制代替尺寸硬性上限。
+- **V133** —— 材料工作簿支持任意行数。
+- **V134** —— 强制渲染世界为原版 `the_void` 超平坦。
+- **V135** —— the_void 世界创建后清除 spawn 保护平台。
+- **V136** —— 隔离临时渲染世界,验证区块真覆盖。
+- **V138** —— 从相机基推导主角帧。
+- **V139** —— 统一工程图布局 + parity 稳定化。
+- **V140** —— 捕获 / axon 布局 / 进度 UI 稳定。
+- **V141** —— axon 视图约束到主角点槽位。
+- **V142** —— axon 锚定 + 表格 UI 缩放。
+- **V150** —— 6 视图合成 + orphan sweep + PAPER_COLOR fullbright 开关。
+- **V151** —— 独立 `materials_only.png`(两端对齐列)。
+- **V152** —— 材料卡片双下载按钮 (XLSX + PNG)。
+- **V153** —— 通过 `Graphics2D.scale(2,2)` 字号 / 分辨率双倍。
+
+完整迭代日志见 commit 历史;早期 V30-V90 是更简单的渲染原型,留在
+`master` 分支便于追溯。
+
+---
+
+## 🗂 Repo layout / 仓库结构
 
 ```
 .
@@ -180,14 +365,53 @@ traceability.
 ├── render_3d.js                    # V1 Three.js prototype (initial commit)
 ├── convert_entity_models.py        # V1 entity-model debug helper
 ├── client_assets/                  # extracted vanilla MC 1.21.1 blockstates + models
-├── poc/                            # the active renderer (see above)
+├── poc/                            # the active renderer (see Architecture)
 ├── tests/                          # regression test litematics
-└── README.md
+├── docs/
+│   └── preview-composite.png       # README 头图,海泡菜 1470k 渲染样张
+├── LOCALIZE.md                     # 本地化清单 (切公开仓前必读)
+└── README.md                       # This file
 ```
 
-The V1 ASCII/texture/Three.js prototypes are kept around for traceability —
-they show how the project started and what we discarded.
+**EN.** The V1 ASCII/texture/Three.js prototypes are kept around for
+traceability — they show how the project started and what we discarded.
 
-## License
+**中文.** V1 的 ASCII / texture / Three.js 原型代码保留,便于追溯项目
+起点和当时被淘汰的思路。
 
-Private project. All rights reserved unless explicitly transferred.
+---
+
+## 📝 License / 许可证
+
+**EN.** Private project. All rights reserved unless explicitly
+transferred.
+
+**中文.** 私人项目,保留所有权利。未经明确授权不得转用。
+
+---
+
+## 🌐 Localization / 本地化
+
+**EN.** See [`LOCALIZE.md`](./LOCALIZE.md). Items are split into three
+buckets:
+
+- **Block public-publish (Bucket A)** — Java group, package, app.py
+  hardcoded paths, JDK location default, UI log translations.
+- **Hardcoded test fixtures (Bucket B)** — `MaterialWorkbookWriter`
+  sample file path, `OffscreenRendererWorldCreationTest` source-relative
+  path.
+- **Aesthetic / branding (Bucket C)** — repo URL on GitHub, Java
+  package name as visible source-tree label.
+
+Run `git grep -n "rsegordon\|/home/rsegordon"` to enumerate every
+location.
+
+**中文.** 见 [`LOCALIZE.md`](./LOCALIZE.md)。分三档:
+
+- **A 档:切公开仓前必须改** —— Java group / 包名,`app.py` 硬编码路径,
+  JDK 默认路径,UI 日志翻译。
+- **B 档:本地化时再改** —— 测试 fixture 路径、`WorldCreationTest` 的
+  src 相对路径。
+- **C 档:审美** —— 仓库 URL、Java 包名作为源码树可见标签。
+
+跑 `git grep -n "rsegordon\|/home/rsegordon"` 列出所有点。
