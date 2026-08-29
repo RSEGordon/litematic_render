@@ -45,9 +45,12 @@
         .toggle-thumb{position:absolute;top:2px;left:2px;width:16px;height:16px;background:var(--card);border-radius:50%;transition:transform .2s;box-shadow:0 1px 3px rgba(0,0,0,.15)}
         .toggle-switch input:checked+.toggle-track{background:var(--blue)}
         .toggle-switch input:checked+.toggle-track .toggle-thumb{transform:translateX(16px)}
-        .viewer{position:relative;min-height:320px;display:grid;place-items:center;background:#e8e5e0;border-radius:8px;overflow:hidden}
-        .viewer img{display:block;max-width:100%;max-height:72vh;object-fit:contain;image-rendering:-webkit-optimize-contrast;image-rendering:crisp-edges}
-        .viewer-status{color:var(--muted);font-size:12px}
+        .viewer{position:relative;min-height:140px;display:grid;place-items:center;background:transparent;border:1px dashed var(--border);border-radius:8px;overflow:hidden;color:var(--muted)}
+        .viewer img{display:block;max-width:100%;max-height:72vh;object-fit:contain;image-rendering:-webkit-optimize-contrast;image-rendering:crisp-edges;border-radius:8px}
+        .viewer-status{display:flex;flex-direction:column;align-items:center;gap:6px;color:var(--muted);font-size:12px}
+        .viewer-status::before{content:"";width:24px;height:24px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:viewer-spin 1s linear infinite}
+        @keyframes viewer-spin{to{transform:rotate(360deg)}}
+        .viewer-status[hidden]{display:none}
         .icon-btn{position:absolute;display:grid;place-items:center;width:42px;height:42px;border:0;border-radius:50%;background:rgba(0,0,0,.58);color:#fff;text-decoration:none;cursor:pointer;opacity:0;transition:opacity .18s;font-size:20px;line-height:1}
         .viewer:hover .icon-btn,.icon-btn:focus{opacity:1}
         .prev{left:12px;top:50%;transform:translateY(-50%)}
@@ -64,10 +67,15 @@
         .empty{color:var(--muted);font-size:12px}
         .workbook{display:flex;align-items:center;gap:14px;color:inherit;text-decoration:none}
         .excel-icon{display:grid;place-items:center;width:48px;height:48px;border-radius:10px;background:#E8F0E6;color:#5A7A55;font-size:22px}
+        .image-icon{display:grid;place-items:center;width:48px;height:48px;border-radius:10px;background:#E6EDF3;color:#4F6B85;font-size:22px}
         .workbook-main{flex:1;min-width:0}
         .workbook-name{display:block;font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis}
         .workbook-meta{display:block;font-size:11px;color:var(--muted);margin-top:5px}
         .download-mark{color:var(--blue);font-size:20px}
+        .downloads-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:4px}
+        .downloads-grid .workbook{border:1px solid var(--border);padding:10px 12px;border-radius:10px;background:var(--card);text-decoration:none;color:inherit;display:flex;align-items:center;gap:14px}
+        .downloads-grid .workbook:hover{border-color:var(--blue);background:#F8FBFD}
+        @media(max-width:520px){.downloads-grid{grid-template-columns:1fr}}
         .error{padding:10px 12px;background:#F4E4E2;color:#8A5550;border-radius:8px;font-size:12px;margin-bottom:12px}
 
         @media(max-width:700px){.container{margin:8px;border-radius:10px;padding:14px}.summary{flex-wrap:wrap}.download-actions{width:100%}.source-download{flex:1;justify-content:center;padding:10px 8px}.icon-btn{opacity:1}.project-name{font-size:18px}}
@@ -113,7 +121,7 @@
                 <div class="viewer-header">
                     <span class="viewer-title">工程制图</span>
                     <label class="toggle-switch" title="切换材料列表显示">
-                        <input type="checkbox" id="materials-toggle" checked>
+                        <input type="checkbox" id="materials-toggle">
                         <span class="toggle-track"><span class="toggle-thumb"></span></span>
                         <span class="toggle-label">材料列表</span>
                     </label>
@@ -124,7 +132,7 @@
                 </div>
                 <div class="render-log" id="render-log" {% if task.status not in ['queued','rendering'] %}hidden{% endif %}><pre id="log-content"></pre></div>
                 <div class="viewer">
-                    <img id="drawing" {% if task.outputs.paper %}src="/tools/litematic_render/{{task.id}}/download/paper"{% else %}hidden{% endif %} alt="工程制图">
+                    <img id="drawing" {% if task.outputs.paper %}src="/tools/litematic_render/{{task.id}}/download/paper"{% else %}hidden{% endif %} alt="" role="presentation">
                     <button class="icon-btn prev" type="button" aria-label="上一张" {% if not task.outputs.paper %}hidden{% endif %}>‹</button>
                     <button class="icon-btn next" type="button" aria-label="下一张" {% if not task.outputs.paper %}hidden{% endif %}>›</button>
                     <a id="drawing-download" class="icon-btn drawing-download" {% if task.outputs.paper %}href="/tools/litematic_render/{{task.id}}/download/paper"{% else %}hidden{% endif %} download aria-label="下载图片">↓</a>
@@ -133,25 +141,36 @@
                 </div>
             </section>
             <section class="card">
-                {% if task.outputs.workbook %}
-                <a class="workbook" href="/tools/litematic_render/{{task.id}}/download/workbook">
-                    <span class="excel-icon">▦</span>
-                    <span class="workbook-main">
-                        <span class="workbook-name">{{task.outputs.workbook}}</span>
-                        <span class="workbook-meta">{{materials|length}} 种材料 · XLSX</span>
-                    </span>
-                    <span class="download-mark">↓</span>
-                </a>
-                {% else %}
-                <span class="empty">材料清单生成中</span>
-                {% endif %}
+                <div class="downloads-grid">
+                    {% if task.outputs.workbook %}
+                    <a class="workbook" href="/tools/litematic_render/{{task.id}}/download/workbook" download>
+                        <span class="excel-icon" title="XLSX 备货清单">▦</span>
+                        <span class="workbook-main">
+                            <span class="workbook-name">{{task.outputs.workbook}}</span>
+                            <span class="workbook-meta">{{materials|length}} 种材料 · XLSX</span>
+                        </span>
+                    </a>
+                    {% endif %}
+                    {% if task.outputs.materials_image %}
+                    <a class="workbook" href="/tools/litematic_render/{{task.id}}/download/materials_image" download>
+                        <span class="image-icon" title="材料列表图 (PNG)">▣</span>
+                        <span class="workbook-main">
+                            <span class="workbook-name">{{task.outputs.materials_image}}</span>
+                            <span class="workbook-meta">{{materials|length}} 种材料 · PNG</span>
+                        </span>
+                    </a>
+                    {% endif %}
+                    {% if not task.outputs.workbook and not task.outputs.materials_image %}
+                    <span class="empty">材料清单生成中</span>
+                    {% endif %}
+                </div>
             </section>
         </div>
     </div>
 
     <div id="image-modal" class="image-modal" aria-hidden="true" role="dialog" aria-label="工程制图放大预览">
         <button class="image-modal-close" type="button" aria-label="关闭">×</button>
-        <img id="image-modal-img" src="" alt="放大图" draggable="false">
+        <img id="image-modal-img" src="" alt="" role="presentation" draggable="false">
     </div>
 
     <script>
@@ -268,15 +287,20 @@
         var progress=log.progress===undefined?(state.progress||0):log.progress;
         // 限制 0-100 防 render.log 解析抖动导致进度条反复跳
         progress=Math.max(0,Math.min(100,progress));
-        progressFill.style.width=progress+'%';
-        // step 字符串空时只显示百分比,避免进度条文字反复跳
-        progressText.textContent=log.step?(log.step+' '+progress+'%'):('渲染中 '+progress+'%');
+        // 进度条宽度单调前进:如果新宽度低于当前,保留当前
+        var lastProgress=progressFill._lastProgress||0;
+        var barWidth=progress<lastProgress?lastProgress:progress;
+        if(progress>=lastProgress){progressFill._lastProgress=progress}
+        progressFill.style.width=barWidth+'%';
+        // step 字符串空时不显示 0%(避免没 log 输出时显示 0%)
+        if(!log.step){progressText.textContent='渲染中'}
+        else{progressText.textContent=log.step+' '+progress+'%'}
         if(log.lines&&log.lines.length){logContent.textContent=log.lines.join('\n');renderLog.scrollTop=renderLog.scrollHeight}
         if(state.status==='complete'){
           polling=false;
-          var probe=new Image();
-          probe.onload=revealCompletedViewer;
-          probe.src='/tools/litematic_render/'+task.id+'/download/paper?t='+Date.now();
+          // 整个页面重渲染:备货清单卡片 / 工程制图切换 / paper 下载按钮等
+          // 都是 Jinja2 根据 task.outputs 写好的,DOM JS 更新不了,必须 reload。
+          location.reload();
           return;
         }
         if(state.status==='failed'){

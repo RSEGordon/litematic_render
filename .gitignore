@@ -37,3 +37,44 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# ==== 2026-08-30 整理: 扩展 ignore 规则 ====
+# 时间戳备份
+*.bak*
+
+# Gradle cache
+poc/.gradle/
+
+# Minecraft 客户端运行时产物（runClient 跑出来的）
+poc/run/
+
+# 历史工作树备份（已被 HEAD 取代）
+poc_v81_backup_*/
+v4[7-9]/
+v5[1-2]/
+v68_worktree_backup_*/
+
+# 客户端资源 jar 备份
+client_assets_*.bak.*/
+
+# Codex 任务 doc（过程文档，不入仓）
+CODEX_TASK_*.md
+CRON_V*.md
+
+# 早期联调脚本备份
+render_obj_cycles.py.pre-codex-*
+render_obj_cycles.py.v*-final
+
+# 调试用 litematic（ad-hoc，不入版本）
+tests/single_piston_*.litematic
+tests/3entities_test.litematic
+tests/平地隐藏树场final.litematic
+tests/迷你海泡菜农场v1.0.litematic
+
+# ==== 2026-08-30 补漏 ====
+# MC 客户端运行时日志
+poc/logs/
+
+# V4x 早期调研 ad-hoc md（不入仓，老板的笔记本）
+V4[6-9]_*.md
+V5[0-3]_*.md

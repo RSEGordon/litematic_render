@@ -97,6 +97,17 @@ public final class OffscreenRenderer {
     private static final String RENDER_WORLD_PREFIX = "LitematicRender_";
     private static final Pattern RENDER_WORLD_NAME = Pattern.compile(
             RENDER_WORLD_PREFIX + "[A-Za-z0-9_-]{1,64}");
+
+    // 工程图固定版式 helper:
+    // View.LEFT_Z_NEG 显示在页面"右视图"列(View.RIGHT_Z_POS 显示在"左视图"列)。
+    // 使用这两个 helper 避免下次又把字面量当显示语义。
+    static ViewPlacement displayedRightPlacement(EngineeringSheetLayout layout) {
+        return layout.placement(View.LEFT_Z_NEG);
+    }
+
+    static ViewPlacement displayedLeftPlacement(EngineeringSheetLayout layout) {
+        return layout.placement(View.RIGHT_Z_POS);
+    }
     private static Job job;
     private static boolean worldStartRequested;
     private static ViewState activeView;
@@ -441,18 +452,36 @@ public final class OffscreenRenderer {
             return placement.x()>=x && placement.y()>=y
                     && placement.right()<=right() && placement.bottom()<=bottom();
         }
+        // V146 §57: 测试用 —— drawingArea 是否包含 principalReservedRect。
+        boolean contains(LayoutRect other) {
+            return other.x()>=x && other.y()>=y
+                    && other.right()<=right() && other.bottom()<=bottom();
+        }
     }
 
-    enum CornerSlot { TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT }
+    // V146: CornerSlot enum 已删除(教学 §7)。Axon 通过列 anchor (displayRight / back) + 行 anchor (TOP / BOTTOM centerY) 直接放。
+    // V146: 顶层 helper — buildEngineeringSheetLayout / unionPrincipalPlacements 需要。
+    private static boolean isPrincipalView(View view) {
+        return view == View.FRONT_X_POS || view == View.LEFT_Z_NEG ||
+                view == View.RIGHT_Z_POS || view == View.BACK_X_NEG ||
+                view == View.TOP_X_UP || view == View.BOTTOM_X_UP;
+    }
 
     record SheetUiMetrics(double scale,int titleFont,int subtitleFont,int materialsTitleFont,
             int materialsBodyFont,int iconSize,int rowHeight,int columnGap,int panelPadding,
             int scaleBarFont,float scaleBarStroke,float outerBorderStroke,float panelBorderStroke,
             int scaleBarHeight,int materialsHeight) {}
 
-    static SheetUiMetrics sheetUiMetrics(int canvasWidth,int canvasHeight,int materialCount) {
-        double scale=Math.max(MIN_SHEET_UI_SCALE,Math.min(MAX_SHEET_UI_SCALE,
-                Math.min(canvasWidth/(double)BASE_SHEET_WIDTH,canvasHeight/(double)BASE_SHEET_HEIGHT)));
+    // V147 §4: Materials panel 完整布局记录 —— 列数自适应后所有绘制都从这里读。
+    record MaterialsLayout(int columns,int rows,
+            int panelWidth,int panelHeight,int innerWidth,
+            int[] columnWidths,int[] columnX,
+            int fontSize,int iconSize,int rowHeight,int columnGap,int padding,
+            int titleGap) {}
+
+    // V144 新增: scale 直接驱动,不再依赖 Canvas 尺寸。
+    static SheetUiMetrics sheetUiMetricsForScale(double requestedScale,int materialCount) {
+        double scale=Math.max(MIN_SHEET_UI_SCALE,Math.min(MAX_SHEET_UI_SCALE,requestedScale));
         int titleFont=scaled(34,scale),subtitleFont=scaled(20,scale);
         int materialsTitleFont=scaled(22,scale),materialsBodyFont=scaled(17,scale);
         int iconSize=scaled(33,scale),padding=scaled(18,scale),columnGap=scaled(54,scale);
@@ -466,14 +495,22 @@ public final class OffscreenRenderer {
                 (float)Math.max(1.0,1.2*scale),scaled(74,scale),materialsHeight);
     }
 
+    // V144 保留旧 API 给测试用;实际生产路径走 sheetUiMetricsForScale。
+    static SheetUiMetrics sheetUiMetrics(int canvasWidth,int canvasHeight,int materialCount) {
+        double scale=Math.min(canvasWidth/(double)BASE_SHEET_WIDTH,
+                canvasHeight/(double)BASE_SHEET_HEIGHT);
+        return sheetUiMetricsForScale(scale,materialCount);
+    }
+
     private static int scaled(int base,double scale) { return Math.max(1,(int)Math.round(base*scale)); }
 
+    // V146: 删除 CornerSlot(V141/V144 slot architecture 已废弃),axonSlots / axonSlotAssignments 不再保留。
     record EngineeringSheetLayout(int canvasWidth, int canvasHeight,
             int drawingTop, int drawingBottom, int drawingCenterY,
             int principalGroupTop, int principalGroupBottom, int principalMainRowY,
             int principalGapX, int principalGapY, int drawingsBottom,
-            LayoutRect drawingArea,LayoutRect principalReservedRect,LayoutRect principalSafetyRect,
-            Map<CornerSlot,LayoutRect> axonSlots,Map<View,CornerSlot> axonSlotAssignments,
+            double globalAxonScale,String axonAspectMode,
+            LayoutRect drawingArea,LayoutRect principalReservedRect,
             Map<View,java.awt.Dimension> sourceSizes,
             Map<View,ViewPlacement> placements) {
         ViewPlacement placement(View view) {
@@ -483,110 +520,335 @@ public final class OffscreenRenderer {
         }
     }
 
+    // V146 唯一权威 builder:一个函数一次生成 10 个 placements + 真实 union Canvas。
+    // 测试与生产必须只调用这一份。
     static EngineeringSheetLayout buildEngineeringSheetLayout(Map<View,java.awt.Dimension> sizes,
             int margin,int titleHeight,int gapX,int gapY,int scaleBarHeight,int materialsHeight) {
-        gapX=scaled(gapX,PRINCIPAL_GAP_MULTIPLIER);
-        gapY=scaled(gapY,PRINCIPAL_GAP_MULTIPLIER);
-        Map<View,java.awt.Dimension> fittedSizes=new java.util.EnumMap<>(View.class);
-        fittedSizes.putAll(sizes);
+        // V146 §12: 检查 10 个尺寸都存在。
+        for (View view:View.values()) {
+            java.awt.Dimension size=sizes.get(view);
+            if (size==null) throw new IllegalArgumentException("Missing source size for "+view);
+            if (size.width<=0 || size.height<=0) throw new IllegalArgumentException("Invalid source size for "+view);
+        }
+        // V146 §13: gapX/gapY 进入 builder 后乘 1.20 一次,后续不再乘。
+        int baseGapX=scaled(gapX,PRINCIPAL_GAP_MULTIPLIER);
+        int baseGapY=scaled(gapY,PRINCIPAL_GAP_MULTIPLIER);
+        Map<View,java.awt.Dimension> srcSizes=new java.util.EnumMap<>(View.class);
+        srcSizes.putAll(sizes);
         View[] main={View.LEFT_Z_NEG,View.FRONT_X_POS,View.RIGHT_Z_POS,View.BACK_X_NEG};
-        int mainWidth=0,mainHeight=0;
-        for (View view:main) {
-            java.awt.Dimension size=fittedSizes.get(view);
-            mainWidth+=size.width;
-            mainHeight=Math.max(mainHeight,size.height);
+        // V146 §14: Principal cell = 六个 Principal 中 max(width, height)。
+        int principalCell=1;
+        for (View view:View.values()) if (isPrincipalView(view)) {
+            java.awt.Dimension s=srcSizes.get(view);
+            principalCell=Math.max(principalCell,Math.max(s.width,s.height));
         }
-        mainWidth+=gapX*(main.length-1);
-        java.awt.Dimension top=fittedSizes.get(View.TOP_X_UP),bottom=fittedSizes.get(View.BOTTOM_X_UP);
-        int groupHeight=top.height+gapY+mainHeight+gapY+bottom.height;
-        int maxPrincipalWidth=0,maxPrincipalHeight=0;
-        for (View view:View.values()) if (!view.name().startsWith("AXON_")) {
-            java.awt.Dimension size=fittedSizes.get(view);
-            maxPrincipalWidth=Math.max(maxPrincipalWidth,size.width);
-            maxPrincipalHeight=Math.max(maxPrincipalHeight,size.height);
+        // V146 §15: Axon 长宽比 + maxRawLong。
+        View[] axons={View.AXON_X_POS_Z_POS,View.AXON_X_NEG_Z_POS,
+                View.AXON_X_POS_Z_NEG,View.AXON_X_NEG_Z_NEG};
+        double maxAxonAspect=1.0;
+        int maxRawLong=1;
+        for (View view:axons) {
+            java.awt.Dimension s=srcSizes.get(view);
+            int longEdge=Math.max(s.width,s.height);
+            int shortEdge=Math.max(1,Math.min(s.width,s.height));
+            maxRawLong=Math.max(maxRawLong,longEdge);
+            maxAxonAspect=Math.max(maxAxonAspect,longEdge/(double)shortEdge);
         }
-        // Axon slot geometry depends only on the frozen principal geometry.
-        int safetyX=Math.max(16,Math.min(48,margin/2)),safetyY=safetyX;
-        int axonGapX=Math.max(20,Math.min(32,gapX));
-        int axonGapY=Math.max(20,Math.min(32,gapY));
-        int slotWidth=Math.max(80,(int)Math.round(maxPrincipalWidth*0.85));
-        int slotHeight=Math.max(80,(int)Math.round(maxPrincipalHeight*0.85));
-        int sideBand=safetyX+axonGapX+slotWidth;
-        int verticalBand=safetyY+axonGapY+slotHeight;
-        int drawingWidth=sideBand+mainWidth+sideBand;
-        int drawingHeight=verticalBand+groupHeight+verticalBand;
-        int drawingTop=margin+titleHeight,drawingBottom=drawingTop+drawingHeight;
-        int drawingCenter=(drawingTop+drawingBottom)/2;
-        int groupTop=drawingCenter-groupHeight/2;
-        int mainY=groupTop+top.height+gapY;
-        int mainX=margin+sideBand;
+        // V146 §16: aspect mode + target long ratio。
+        String axonAspectMode;
+        double targetLongRatio;
+        if (maxAxonAspect>AXON_ASPECT_EXTREME) {
+            axonAspectMode="EXTREME_ELONGATED";
+            targetLongRatio=0.82;
+        } else if (maxAxonAspect>AXON_ASPECT_ELONGATED) {
+            axonAspectMode="ELONGATED";
+            targetLongRatio=0.78;
+        } else {
+            axonAspectMode="NORMAL";
+            targetLongRatio=0.72;
+        }
+        // V146 §17: globalAxonScale。
+        int targetAxonLong=(int)Math.round(principalCell*targetLongRatio);
+        double globalAxonScale=targetAxonLong/(double)maxRawLong;
+        globalAxonScale=Math.min(1.0,globalAxonScale); // §17 禁止 source 无限放大。
+        // V146 §18: axonDisplaySizes + uniformAxonBoxW/H。
+        Map<View,java.awt.Dimension> axonDisplaySizes=new java.util.EnumMap<>(View.class);
+        int uniformAxonBoxW=1,uniformAxonBoxH=1;
+        for (View view:axons) {
+            java.awt.Dimension raw=srcSizes.get(view);
+            int w=Math.max(1,(int)Math.round(raw.width*globalAxonScale));
+            int h=Math.max(1,(int)Math.round(raw.height*globalAxonScale));
+            axonDisplaySizes.put(view,new java.awt.Dimension(w,h));
+            uniformAxonBoxW=Math.max(uniformAxonBoxW,w);
+            uniformAxonBoxH=Math.max(uniformAxonBoxH,h);
+        }
+        // V146 §21: mainHeight = 4 个 main 的 max height(项目内都是 common scale,所以等高)。
+        int mainHeight=0;
+        for (View view:main) mainHeight=Math.max(mainHeight,srcSizes.get(view).height);
+        java.awt.Dimension top=srcSizes.get(View.TOP_X_UP);
+        java.awt.Dimension bottom=srcSizes.get(View.BOTTOM_X_UP);
+        // V146 §28: 局部坐标 mainY=0 / x=0,后整体平移。
+        int mainY=0;
+        int x=0;
         Map<View,ViewPlacement> placements=new java.util.EnumMap<>(View.class);
+        // V146 §29-30: 用 finalGapX 放 main row,这里先用一个临时 gapX(finalGapX 在 §25 算),先放 main 占位。
+        // 我们先按 baseGapX 放,等 finalGapX 算出来再 align。
+        // §23/§24 给出 left/right 双向约束。
+        double sheetScale=principalCell/(double)BASE_PRINCIPAL_CELL;
+        int axonSafetyGapX=(int)Math.round(AXON_SAFETY_GAP_BASE*sheetScale);
+        int axonSafetyGapY=axonSafetyGapX;
+        // 临时放 main 取 front centerX。
         for (View view:main) {
-            java.awt.Dimension size=fittedSizes.get(view);
-            placements.put(view,new ViewPlacement(view,mainX,mainY,size.width,mainHeight));
-            mainX+=size.width+gapX;
+            java.awt.Dimension s=srcSizes.get(view);
+            placements.put(view,new ViewPlacement(view,x,mainY,s.width,mainHeight));
+            x+=s.width+baseGapX;
         }
+        ViewPlacement tempDisplayRight=placements.get(View.LEFT_Z_NEG);
+        ViewPlacement tempFront=placements.get(View.FRONT_X_POS);
+        ViewPlacement tempBack=placements.get(View.BACK_X_NEG);
+        // V146 §23 requiredGapLeft。
+        int requiredGapLeft=(int)Math.ceil(
+                uniformAxonBoxW/2.0+axonSafetyGapX+top.width/2.0
+                        -tempDisplayRight.width()/2.0-tempFront.width()/2.0);
+        // V146 §24 requiredGapRight (FRONT ↔ BACK 中有两个 gap,需要各承担 (required-frontToBackWithoutGap)/2)。
+        double fixedFrontToBackWithoutGap=tempFront.width()/2.0
+                +placements.get(View.RIGHT_Z_POS).width()
+                +tempBack.width()/2.0;
+        double requiredDistance=top.width/2.0+axonSafetyGapX+uniformAxonBoxW/2.0;
+        int requiredGapRight=(int)Math.ceil(Math.max(0,(requiredDistance-fixedFrontToBackWithoutGap)/2.0));
+        // V146 §25: finalGapX = max(baseGapX, requiredGapLeft, requiredGapRight)。
+        int finalGapX=Math.max(baseGapX,Math.max(requiredGapLeft,requiredGapRight));
+        // §26 requiredGapYTop/Bottom。
+        int requiredGapYTop=(int)Math.ceil(
+                uniformAxonBoxH/2.0+axonSafetyGapY-top.height/2.0);
+        int requiredGapYBottom=(int)Math.ceil(
+                uniformAxonBoxH/2.0+axonSafetyGapY-bottom.height/2.0);
+        int finalGapY=Math.max(baseGapY,Math.max(requiredGapYTop,requiredGapYBottom));
+        // 重新按 finalGapX 放 main row。
+        placements.clear();
+        x=0;
+        for (View view:main) {
+            java.awt.Dimension s=srcSizes.get(view);
+            placements.put(view,new ViewPlacement(view,x,mainY,s.width,mainHeight));
+            x+=s.width+finalGapX;
+        }
+        // V146 §30: 从最终 main row 取 anchor。
+        ViewPlacement displayRight=placements.get(View.LEFT_Z_NEG);
         ViewPlacement front=placements.get(View.FRONT_X_POS);
+        ViewPlacement displayLeft=placements.get(View.RIGHT_Z_POS);
+        ViewPlacement back=placements.get(View.BACK_X_NEG);
+        // V146 §31: TOP/BOTTOM 严格:TOP.bottom + finalGapY == FRONT.top。
+        int topY=mainY-finalGapY-top.height;
+        int bottomY=mainY+mainHeight+finalGapY;
         placements.put(View.TOP_X_UP,new ViewPlacement(View.TOP_X_UP,
-                front.centerX()-top.width/2,mainY-gapY-top.height,top.width,top.height));
+                front.centerX()-top.width/2,topY,top.width,top.height));
         placements.put(View.BOTTOM_X_UP,new ViewPlacement(View.BOTTOM_X_UP,
-                front.centerX()-bottom.width/2,mainY+mainHeight+gapY,bottom.width,bottom.height));
-        LayoutRect reserved=new LayoutRect(margin+sideBand,groupTop,mainWidth,groupHeight);
-        LayoutRect safety=new LayoutRect(reserved.x()-safetyX,reserved.y()-safetyY,
-                reserved.width()+safetyX*2,reserved.height()+safetyY*2);
-        LayoutRect drawingArea=new LayoutRect(margin,drawingTop,drawingWidth,drawingHeight);
-        ViewPlacement right=placements.get(View.LEFT_Z_NEG),back=placements.get(View.BACK_X_NEG);
-        ViewPlacement topPlacement=placements.get(View.TOP_X_UP),bottomPlacement=placements.get(View.BOTTOM_X_UP);
-        int leftInner=placements.get(View.FRONT_X_POS).x()-axonGapX;
-        int rightInner=placements.get(View.RIGHT_Z_POS).right()+axonGapX;
-        int upperBottom=mainY-axonGapY,lowerTop=mainY+mainHeight+axonGapY;
-        Map<CornerSlot,LayoutRect> slots=new java.util.EnumMap<>(CornerSlot.class);
-        slots.put(CornerSlot.TOP_LEFT,centeredSlot(right.centerX(),topPlacement.centerY(),
-                drawingArea.x(),leftInner,drawingArea.y(),upperBottom));
-        slots.put(CornerSlot.TOP_RIGHT,centeredSlot(back.centerX(),topPlacement.centerY(),
-                rightInner,drawingArea.right(),drawingArea.y(),upperBottom));
-        slots.put(CornerSlot.BOTTOM_LEFT,centeredSlot(right.centerX(),bottomPlacement.centerY(),
-                drawingArea.x(),leftInner,lowerTop,drawingArea.bottom()));
-        slots.put(CornerSlot.BOTTOM_RIGHT,centeredSlot(back.centerX(),bottomPlacement.centerY(),
-                rightInner,drawingArea.right(),lowerTop,drawingArea.bottom()));
-        Map<View,CornerSlot> assignments=new java.util.EnumMap<>(View.class);
-        assignments.put(View.AXON_X_POS_Z_POS,CornerSlot.TOP_LEFT);
-        assignments.put(View.AXON_X_NEG_Z_POS,CornerSlot.TOP_RIGHT);
-        assignments.put(View.AXON_X_POS_Z_NEG,CornerSlot.BOTTOM_LEFT);
-        assignments.put(View.AXON_X_NEG_Z_NEG,CornerSlot.BOTTOM_RIGHT);
-        for (Map.Entry<View,CornerSlot> entry:assignments.entrySet())
-            putAxonInSlot(placements,fittedSizes,entry.getKey(),slots.get(entry.getValue()));
+                front.centerX()-bottom.width/2,bottomY,bottom.width,bottom.height));
+        // V146 §32: upperCenterY / lowerCenterY 直接绑定 TOP/BOTTOM centerY。
+        int upperCenterY=placements.get(View.TOP_X_UP).centerY();
+        int lowerCenterY=placements.get(View.BOTTOM_X_UP).centerY();
+        // V146 §33: 四个 Axon 直接放锚点,使用 globalAxonScale 后的尺寸。
+        for (View av:axons) {
+            java.awt.Dimension ds=axonDisplaySizes.get(av);
+            int centerX=av==View.AXON_X_POS_Z_POS||av==View.AXON_X_POS_Z_NEG?displayRight.centerX():back.centerX();
+            int centerY=av==View.AXON_X_POS_Z_POS||av==View.AXON_X_NEG_Z_POS?upperCenterY:lowerCenterY;
+            placeAxonAtAnchor(placements,av,centerX,centerY,ds.width,ds.height);
+        }
+        // V146 §35-37: union 10 placements → 整体平移到 margin/title 下方。
+        LayoutRect rawBounds=unionPlacements(placements);
+        int dx=margin-rawBounds.x();
+        int dy=margin+titleHeight-rawBounds.y();
+        placements=shiftPlacements(placements,dx,dy);
+        // V146 §40: drawingArea = 10 views 的真实 union。
+        LayoutRect drawingArea=unionPlacements(placements);
+        LayoutRect principalReserved=unionPrincipalPlacements(placements);
+        // V146 §43-44: Principal group 数据从真实 Principal union 得到。
+        int principalGroupTop=principalReserved.y();
+        int principalGroupBottom=principalReserved.bottom();
+        int principalMainRowY=placements.get(View.FRONT_X_POS).y();
+        int drawingTop=drawingArea.y();
+        int drawingBottom=drawingArea.bottom();
+        int drawingCenterY=(drawingTop+drawingBottom)/2;
+        // V146 §41: Canvas width = drawingArea.right + margin。
+        int canvasWidth=drawingArea.right()+margin;
+        // V146 §42: Canvas height = drawingBottom + scaleBar + materials + margin。
         int canvasHeight=drawingBottom+scaleBarHeight+materialsHeight+margin;
-        return new EngineeringSheetLayout(margin*2+drawingWidth,canvasHeight,drawingTop,
-                drawingBottom,drawingCenter,groupTop,groupTop+groupHeight,mainY,gapX,gapY,
-                drawingBottom,drawingArea,reserved,safety,
-                java.util.Collections.unmodifiableMap(slots),
-                java.util.Collections.unmodifiableMap(assignments),
-                java.util.Collections.unmodifiableMap(fittedSizes),
+        return new EngineeringSheetLayout(canvasWidth,canvasHeight,
+                drawingTop,drawingBottom,drawingCenterY,
+                principalGroupTop,principalGroupBottom,principalMainRowY,
+                finalGapX,finalGapY,
+                drawingBottom,
+                globalAxonScale,axonAspectMode,
+                drawingArea,principalReserved,
+                java.util.Collections.unmodifiableMap(srcSizes),
                 java.util.Collections.unmodifiableMap(placements));
     }
 
-    private static LayoutRect centeredSlot(int centerX,int centerY,int minX,int maxX,int minY,int maxY) {
-        int halfWidth=Math.max(0,Math.min(centerX-minX,maxX-centerX));
-        int halfHeight=Math.max(0,Math.min(centerY-minY,maxY-centerY));
-        return new LayoutRect(centerX-halfWidth,centerY-halfHeight,halfWidth*2,halfHeight*2);
+    // V146 §78: 删除 centeredSlot / insetRect(V141/V144 slot architecture 已废弃)。
+
+    // V144: Axon 在 slot 内最大相对缩放比例(V146 §19 已弃用:不允许 Axon 单独 fit slot)。
+    private static final double MAX_AXON_RELATIVE_SCALE=0.85;
+
+    // V144: UI metrics 的基础常量 (跟 sheetUiMetricsForScale 配合使用)。
+    private static final int BASE_PRINCIPAL_CELL=540;
+
+    // V146: Axon 目标 long edge 范围,按模型 axon 长宽比动态选择。
+    private static final double MIN_AXON_LONG_RATIO=0.55;
+    private static final double MAX_AXON_LONG_RATIO=0.90;
+    private static final double PREFERRED_SHORT_EDGE_RATIO=0.08;
+    private static final int MIN_SHORT_EDGE_PX=48;
+    // Aspect 阈值:NORMAL / ELONGATED / EXTREME_ELONGATED。
+    private static final double AXON_ASPECT_ELONGATED=2.5;
+    private static final double AXON_ASPECT_EXTREME=5.0;
+    // Axon 与 Principal 之间的安全间距 (按 sheetScale)。
+    private static final double AXON_SAFETY_GAP_BASE=24.0;
+    // 降级阶梯:0.82 → 0.76 → 0.70 → 0.64 → 0.55 (最高 → 最低)
+    private static final double[] AXON_LONG_DOWNGRADE_STEPS={0.82,0.76,0.70,0.64,0.55};
+
+    // V146 §40: Axon 放锚点 — 接收已确定的 scaledW/scaledH,放到指定 anchor center。
+    private static void placeAxonAtAnchor(Map<View,ViewPlacement> placements,
+            View view,int centerX,int centerY,int width,int height) {
+        int x=centerX-width/2;
+        int y=centerY-height/2;
+        placements.put(view,new ViewPlacement(view,x,y,width,height));
     }
 
-    private static void putAxonInSlot(Map<View,ViewPlacement> placements,
-            Map<View,java.awt.Dimension> sizes,View view,LayoutRect slot) {
-        java.awt.Dimension size=sizes.get(view);
-        double scale=Math.min(0.85,Math.min(slot.width()/(double)Math.max(1,size.width),
-                slot.height()/(double)Math.max(1,size.height)));
-        int width=Math.max(1,Math.min(slot.width(),(int)Math.floor(size.width*scale)));
-        int height=Math.max(1,Math.min(slot.height(),(int)Math.floor(size.height*scale)));
-        // Match parity so integer center coordinates remain exactly on the principal grid.
-        if ((width&1)!=(slot.width()&1) && width>1) width--;
-        if ((height&1)!=(slot.height()&1) && height>1) height--;
-        if (Math.max(width,height)<64)
-            throw new IllegalStateException("LAYOUT_FAIL: axon minimum extent unavailable for "+view);
-        int x=slot.x()+(slot.width()-width)/2;
-        int y=slot.y()+(slot.height()-height)/2;
-        placements.put(view,new ViewPlacement(view,x,y,width,height));
+    // V146 §35-36: 10 views union & 仅 Principal union。
+    static LayoutRect unionPlacements(Map<View,ViewPlacement> placements) {
+        int minX=Integer.MAX_VALUE;
+        int minY=Integer.MAX_VALUE;
+        int maxX=Integer.MIN_VALUE;
+        int maxY=Integer.MIN_VALUE;
+        for (ViewPlacement p:placements.values()) {
+            minX=Math.min(minX,p.x());
+            minY=Math.min(minY,p.y());
+            maxX=Math.max(maxX,p.right());
+            maxY=Math.max(maxY,p.bottom());
+        }
+        return new LayoutRect(minX,minY,Math.max(0,maxX-minX),Math.max(0,maxY-minY));
+    }
+
+    static LayoutRect unionPrincipalPlacements(Map<View,ViewPlacement> placements) {
+        int minX=Integer.MAX_VALUE;
+        int minY=Integer.MAX_VALUE;
+        int maxX=Integer.MIN_VALUE;
+        int maxY=Integer.MIN_VALUE;
+        for (Map.Entry<View,ViewPlacement> entry:placements.entrySet()) {
+            if (!isPrincipalView(entry.getKey())) continue;
+            ViewPlacement p=entry.getValue();
+            minX=Math.min(minX,p.x());
+            minY=Math.min(minY,p.y());
+            maxX=Math.max(maxX,p.right());
+            maxY=Math.max(maxY,p.bottom());
+        }
+        return new LayoutRect(minX,minY,Math.max(0,maxX-minX),Math.max(0,maxY-minY));
+    }
+
+    // V146 §38: 平移 helper。
+    static Map<View,ViewPlacement> shiftPlacements(Map<View,ViewPlacement> source,int dx,int dy) {
+        Map<View,ViewPlacement> result=new java.util.EnumMap<>(View.class);
+        for (Map.Entry<View,ViewPlacement> entry:source.entrySet()) {
+            ViewPlacement p=entry.getValue();
+            result.put(entry.getKey(),
+                    new ViewPlacement(p.view(),p.x()+dx,p.y()+dy,p.width(),p.height()));
+        }
+        return result;
+    }
+
+    // V147: Materials panel 列数 4→3→2→1 自适应。列宽用真实 FontMetrics 计算。
+    // 返回的 MaterialsLayout 包含列数、每列宽度、每列 x 偏移、行高、panel 高度等。
+    // 绘制 drawMaterials() 和 compositeEngineeringSheet() 都只读这里。
+    static final int MAX_MATERIAL_COLUMNS=4;
+
+    // V148: Materials 列宽 = 平均分配 innerWidth(列组铺满 panel);name/icon 左对齐 + quantity 右对齐本列。
+    static MaterialsLayout buildMaterialsLayout(java.util.List<MaterialEntry> materials,
+            int availablePanelWidth,SheetUiMetrics ui,java.awt.FontMetrics metrics) {
+        return buildMaterialsLayout(materials,availablePanelWidth,ui,metrics,MAX_MATERIAL_COLUMNS);
+    }
+
+    private static MaterialsLayout buildMaterialsLayout(java.util.List<MaterialEntry> materials,
+            int availablePanelWidth,SheetUiMetrics ui,java.awt.FontMetrics metrics,
+            int requestedMaxColumns) {
+        int padding=ui.panelPadding();
+        int innerWidth=Math.max(0,availablePanelWidth-2*padding);
+        int iconSize=ui.iconSize();
+        int columnGap=ui.columnGap();
+        int rowHeight=ui.rowHeight();
+        int titleGap=scaled(32,ui.scale());
+        int fontSize=ui.materialsBodyFont();
+        int iconTextGap=scaled(10,ui.scale());
+        int nameQuantityGap=scaled(12,ui.scale());
+        // V148 §21: 预先测量每条 entry 的 quantity 宽度(列宽 = 平均分,每列能装下最小 name)。
+        int[] quantityWidths=new int[materials.size()];
+        for (int i=0;i<materials.size();i++) {
+            String quantity=Long.toString(materials.get(i).count);
+            quantityWidths[i]=Math.max(1,metrics.stringWidth(quantity));
+        }
+        // 最小可读 name 空间:起码能让一个短汉字 name 不被 ellipsis。
+        int minReadableNameW=scaled(40,ui.scale());
+        // V148 §22: 列数 = 选最大可行列数(按平均列宽能装下最小 entry)。
+        int maxColumns=Math.max(1,Math.min(requestedMaxColumns,
+                Math.min(MAX_MATERIAL_COLUMNS,Math.max(1,materials.size()))));
+        int chosen=1;
+        for (int candidate=maxColumns;candidate>=1;candidate--) {
+            // V148 §9: 平均列宽 = (innerWidth - (candidate-1)*columnGap) / candidate。
+            int totalColumnWidth=innerWidth-(candidate-1)*columnGap;
+            if (totalColumnWidth<=0) continue;
+            int baseColumnWidth=totalColumnWidth/candidate;
+            if (baseColumnWidth<=0) continue;
+            // V148 §21: 检查所有 entry 在平均列宽下,至少有 minReadableNameW 留给 name。
+            boolean ok=true;
+            for (int i=0;i<materials.size();i++) {
+                int nameMaxWidth=baseColumnWidth-iconSize-iconTextGap-nameQuantityGap-quantityWidths[i];
+                if (nameMaxWidth<minReadableNameW) { ok=false; break; }
+            }
+            if (ok) { chosen=candidate; break; }
+        }
+        // V148 §22: 真正生成 MaterialsLayout —— 列宽严格等宽,左 padding 起铺满。
+        int rows=(int)Math.ceil(materials.size()/(double)chosen);
+        int totalColumnWidth=innerWidth-(chosen-1)*columnGap;
+        int baseColumnWidth=chosen>0?totalColumnWidth/chosen:innerWidth;
+        int remainder=chosen>0?totalColumnWidth%chosen:0;
+        int[] columnWidths=new int[chosen];
+        int[] columnX=new int[chosen];
+        for (int c=0;c<chosen;c++) {
+            columnWidths[c]=baseColumnWidth+(c<remainder?1:0);
+        }
+        // V148 §22: columnX[0] = padding,columnX[c] = columnX[c-1] + columnWidths[c-1] + gap。
+        columnX[0]=padding;
+        for (int c=1;c<chosen;c++) {
+            columnX[c]=columnX[c-1]+columnWidths[c-1]+columnGap;
+        }
+        int panelHeight=padding+ui.materialsTitleFont()+titleGap+rows*rowHeight+padding;
+        MaterialsLayout chosenLayout=new MaterialsLayout(chosen,rows,
+                availablePanelWidth,panelHeight,innerWidth,
+                columnWidths,columnX,
+                fontSize,iconSize,rowHeight,columnGap,padding,titleGap);
+        // V148 §24: 内容占满率日志。
+        int totalColW=0;
+        for (int w:columnWidths) totalColW+=w;
+        double fillRatio=innerWidth>0?(totalColW+(chosen-1)*columnGap)/(double)innerWidth:0.0;
+        System.out.printf(Locale.ROOT,
+                "MATERIALS_LAYOUT mode=JUSTIFIED chosenColumns=%d rows=%d panelWidth=%d innerWidth=%d columnGap=%d",
+                chosen,rows,availablePanelWidth,innerWidth,columnGap);
+        for (int c=0;c<chosen;c++) {
+            System.out.printf(Locale.ROOT," columnWidth[%d]=%d",c,columnWidths[c]);
+        }
+        System.out.printf(Locale.ROOT," fillRatio=%.3f%n",fillRatio);
+        if (rows==1) {
+            System.out.printf(Locale.ROOT,
+                    "MATERIALS_LAYOUT_SINGLE_ROW justified=true columns=%d%n",chosen);
+        }
+        for (int c=0;c<chosen;c++) {
+            System.out.printf(Locale.ROOT,
+                    "MATERIALS_COLUMN index=%d x=%d width=%d items=%d%n",
+                    c,columnX[c],columnWidths[c],chosenLayout.rows());
+        }
+        System.out.printf(Locale.ROOT,
+                "MATERIALS_UI fontSize=%d iconSize=%d rowHeight=%d columnGap=%d padding=%d%n",
+                chosenLayout.fontSize(),chosenLayout.iconSize(),chosenLayout.rowHeight(),
+                chosenLayout.columnGap(),chosenLayout.padding());
+        return chosenLayout;
     }
 
     static ProjectedSpan projectedSpan(double minX, double minY, double minZ,
@@ -638,6 +900,11 @@ public final class OffscreenRenderer {
         long matteGeometryRevision;
         int wait, view, tickCount;
         int captureWidth, captureHeight;
+        // 诊断日志限频字段:
+        // - lastEntityTickDiagnosticNanos: ENTITY_TICK_DIAG 上次输出时间
+        // - lastCameraDiagnosticKey: 上次 CAMERA_VIEW/AXON_DISTANCE_CHECK 的 (pass+view+resolution) key
+        long lastEntityTickDiagnosticNanos;
+        String lastCameraDiagnosticKey;
         NativeImage blackPass;
         CapturePass capturePass;
         MobEffectInstance previousNightVision;
@@ -649,6 +916,8 @@ public final class OffscreenRenderer {
         NativeImage materialBlackPass;
         int nextEntityId = -1000;
         String lastEntityDiagnosticKey, lastProjectionDiagnosticKey;
+        // V144: 单一 UI metrics,Paper/Blueprint/Materials/日志共享同一份。
+        SheetUiMetrics engineeringSheetUiMetrics;
         // Per-view saved native image (post alpha matting) for composite assembly
         final NativeImage[] composites = new NativeImage[View.values().length];
         final float[] principalHalfSizes = new float[View.values().length];
@@ -1347,8 +1616,17 @@ public final class OffscreenRenderer {
         }
 
         void logEntityTickDiagnostic() {
+            // 无投影实体时整条跳过,避免每 tick 刷屏。
+            if (frozenEntities.isEmpty()) return;
+            long now=System.nanoTime();
+            // 有实体时限频:每秒最多一行。
+            if (lastEntityTickDiagnosticNanos!=0
+                    && now-lastEntityTickDiagnosticNanos<1_000_000_000L) {
+                return;
+            }
+            lastEntityTickDiagnosticNanos=now;
             System.out.printf("ENTITY_TICK_DIAG time=%dms entityCount=%d%n",
-                    (System.nanoTime() - jobStarted) / 1_000_000, frozenEntities.size());
+                    (now-jobStarted)/1_000_000, frozenEntities.size());
         }
 
         ViewState cameraFor(View view, Minecraft client) {
@@ -1392,25 +1670,34 @@ public final class OffscreenRenderer {
             float farPlane=(float)Math.max(256.0,distance+radius+32.0);
             ViewState state=new ViewState(position,forward,right,up,halfSize,farPlane,
                     horizontal*2.0,vertical*2.0);
-            System.out.printf(Locale.ROOT,
-                    "CAMERA_VIEW view=%s center=Vec3(%.4f,%.4f,%.4f) position=Vec3(%.4f,%.4f,%.4f) "
-                            + "radius=%.4f distance=%.4f halfSize=%.4f farPlane=%.4f "
-                            + "projectedWorld=%.4fx%.4f elapsed=%dms%n",
-                    view,center.x,center.y,center.z,state.position.x,state.position.y,state.position.z,
-                    radius,distance,state.halfSize,state.farPlane,
-                    state.projectedWorldWidth,state.projectedWorldHeight,
-                    (System.nanoTime() - jobStarted) / 1_000_000);
-            if (!isPrincipalView(view)) {
-                double farthestCornerDistance=0.0;
-                for (double x : new double[]{minX,maxX}) for (double y : new double[]{minY,maxY})
-                    for (double z : new double[]{minZ,maxZ}) {
-                        farthestCornerDistance=Math.max(farthestCornerDistance,
-                                new Vec3(x,y,z).distanceTo(position));
-                    }
+            // 限频:同一 (pass + view + resolution) 只打印一次 CAMERA_VIEW/AXON_DISTANCE_CHECK。
+            // 覆盖率校验阶段用 COVERAGE 占位,进入 capture 后用真实 pass 名。
+            String cameraDiagnosticKey=(coverageValidated?capturePass.name():"COVERAGE")
+                    +":"+view.name()
+                    +":"+Minecraft.getInstance().gameRenderer.mainRenderTarget().width
+                    +"x"+Minecraft.getInstance().gameRenderer.mainRenderTarget().height;
+            if (!cameraDiagnosticKey.equals(lastCameraDiagnosticKey)) {
+                lastCameraDiagnosticKey=cameraDiagnosticKey;
                 System.out.printf(Locale.ROOT,
-                        "AXON_DISTANCE_CHECK view=%s radius=%.4f cameraDistance=%.4f "
-                                + "farthestCornerDistance=%.4f renderDistanceBlocks=%d%n",
-                        view,radius,distance,farthestCornerDistance,RENDER_DISTANCE_CHUNKS*16);
+                        "CAMERA_VIEW view=%s center=Vec3(%.4f,%.4f,%.4f) position=Vec3(%.4f,%.4f,%.4f) "
+                                + "radius=%.4f distance=%.4f halfSize=%.4f farPlane=%.4f "
+                                + "projectedWorld=%.4fx%.4f elapsed=%dms%n",
+                        view,center.x,center.y,center.z,state.position.x,state.position.y,state.position.z,
+                        radius,distance,state.halfSize,state.farPlane,
+                        state.projectedWorldWidth,state.projectedWorldHeight,
+                        (System.nanoTime() - jobStarted) / 1_000_000);
+                if (!isPrincipalView(view)) {
+                    double farthestCornerDistance=0.0;
+                    for (double x : new double[]{minX,maxX}) for (double y : new double[]{minY,maxY})
+                        for (double z : new double[]{minZ,maxZ}) {
+                            farthestCornerDistance=Math.max(farthestCornerDistance,
+                                    new Vec3(x,y,z).distanceTo(position));
+                        }
+                    System.out.printf(Locale.ROOT,
+                            "AXON_DISTANCE_CHECK view=%s radius=%.4f cameraDistance=%.4f "
+                                    + "farthestCornerDistance=%.4f renderDistanceBlocks=%d%n",
+                            view,radius,distance,farthestCornerDistance,RENDER_DISTANCE_CHUNKS*16);
+                }
             }
             return state;
         }
@@ -1496,6 +1783,13 @@ public final class OffscreenRenderer {
             String key=capturePass+":"+captureView;
             if (key.equals(lastEntityDiagnosticKey)) return;
             lastEntityDiagnosticKey=key;
+            // trackedEntityCount=0 表示当前 litematic 没有任何投影实体。
+            // 这是正常状态:明确打 SKIP 后 return,避免输出让人误以为是错误的 client/renderState 计数。
+            if (frozenEntities.isEmpty()) {
+                System.out.printf("ENTITY_EXTRACTION view=%s pass=%s trackedEntityCount=0 result=SKIP reason=NO_TRACKED_LITEMATIC_ENTITIES%n",
+                        captureView,capturePass);
+                return;
+            }
             int clientEntityCount=0;
             for (Entity ignored : Minecraft.getInstance().level.entitiesForRendering()) clientEntityCount++;
             System.out.printf("ENTITY_EXTRACTION view=%s pass=%s clientLevelEntityCount=%d renderStateCount=%d trackedEntityCount=%d%n",
@@ -1953,6 +2247,7 @@ public final class OffscreenRenderer {
                 progress.emit(90,"ASSEMBLE_BLUEPRINT",null,"Assembling blueprint engineering sheet");
                 assembleStyle(Style.BLUEPRINT, "");
             }
+            writeMaterialsOnly();
             System.out.printf("  - outputs: %s%n  - elapsed: %d ms%n",
                     compositeOutputPaths(), (System.nanoTime() - started) / 1_000_000);
         }
@@ -1973,13 +2268,14 @@ public final class OffscreenRenderer {
 
         private void buildSharedEngineeringSheetLayout() {
             if (engineeringSheetLayout!=null) return;
-            int cell=Math.max(540,captureBaseResolution()/2);
-            double sheetScale=cell/540.0;
+            int cell=Math.max(BASE_PRINCIPAL_CELL,captureBaseResolution()/2);
+            double sheetScale=cell/(double)BASE_PRINCIPAL_CELL;
             int gapX=(int)Math.round(positiveIntProperty("litematic.sheet.contentGutterX",CONTENT_GUTTER_X)*sheetScale);
             int gapY=(int)Math.round(positiveIntProperty("litematic.sheet.contentGutterY",CONTENT_GUTTER_Y)*sheetScale);
             int margin=(int)Math.round(56*sheetScale),titleH=(int)Math.round(82*sheetScale);
-            SheetUiMetrics estimate=sheetUiMetrics(scaled(BASE_SHEET_WIDTH,sheetScale),
-                    scaled(BASE_SHEET_HEIGHT,sheetScale),materials.size());
+            // V146: UI metrics 一次计算,所有下游共用。
+            SheetUiMetrics ui=sheetUiMetricsForScale(sheetScale,materials.size());
+            engineeringSheetUiMetrics=ui;
             double sizeX=maxX-minX,sizeY=maxY-minY,sizeZ=maxZ-minZ;
             double principalScale=cell/Math.max(1.0,Math.max(sizeX,Math.max(sizeY,sizeZ)));
             System.out.printf(Locale.ROOT,
@@ -1993,33 +2289,30 @@ public final class OffscreenRenderer {
                     sharedPrincipalFrames[view.ordinal()]=frame;
                     sizes.put(view,new java.awt.Dimension(frame.sheetWidth(),frame.sheetHeight()));
                 } else {
-                    int width=1,height=1;
+                    // V146 §10: Axon 不预 fit 到 cell,直接 raw content box。
+                    int rawW=1,rawH=1;
                     if (style.writesBlueprint()) {
                         ContentBox box=contentBox(blueprintViews[view.ordinal()]);
-                        double fit=Math.min(1.0,cell/(double)Math.max(box.width(),box.height()));
-                        width=Math.max(width,(int)Math.round(box.width()*fit));
-                        height=Math.max(height,(int)Math.round(box.height()*fit));
+                        rawW=Math.max(rawW,box.width());
+                        rawH=Math.max(rawH,box.height());
                     }
                     if (style.writesPaper()) {
                         ContentBox box=contentBox(colorViews[view.ordinal()]);
-                        double fit=Math.min(1.0,cell/(double)Math.max(box.width(),box.height()));
-                        width=Math.max(width,(int)Math.round(box.width()*fit));
-                        height=Math.max(height,(int)Math.round(box.height()*fit));
+                        rawW=Math.max(rawW,box.width());
+                        rawH=Math.max(rawH,box.height());
                     }
-                    sizes.put(view,new java.awt.Dimension(width,height));
+                    sizes.put(view,new java.awt.Dimension(rawW,rawH));
                 }
             }
-            progress.emit(78,"BUILD_PRINCIPAL_LAYOUT",null,"Freezing principal layout");
-            progress.emit(80,"BUILD_AXON_SLOTS",null,"Building principal corner slots");
-            EngineeringSheetLayout estimateLayout=OffscreenRenderer.buildEngineeringSheetLayout(sizes,margin,titleH,
-                    gapX,gapY,estimate.scaleBarHeight(),estimate.materialsHeight());
-            SheetUiMetrics ui=sheetUiMetrics(estimateLayout.canvasWidth(),estimateLayout.canvasHeight(),materials.size());
+            // V146 §11: 只调用 builder 一次。
+            progress.emit(78,"BUILD_ENGINEERING_LAYOUT",null,"Freezing 10-view engineering layout");
             engineeringSheetLayout=OffscreenRenderer.buildEngineeringSheetLayout(sizes,margin,titleH,
                     gapX,gapY,ui.scaleBarHeight(),ui.materialsHeight());
-            progress.emit(82,"FIT_AXON_VIEWS",null,"Fitting axonometric views into slots");
+            progress.emit(80,"SCALE_AXON_VIEWS",null,"Computing uniform axon scale");
             logPrincipalViewSizes(sizeX,sizeY,sizeZ,principalScale);
             logEngineeringSheetLayout(engineeringSheetLayout);
             validateEngineeringSheetLayout(engineeringSheetLayout);
+            progress.emit(82,"VALIDATE_ENGINEERING_LAYOUT",null,"Validating engineering layout");
             progress.emit(83,"AXON_COLLISION_CHECK",null,"Validating view collisions");
         }
 
@@ -2053,20 +2346,60 @@ public final class OffscreenRenderer {
             double scale = cell / 540.0;
             int margin = (int)Math.round(56 * scale);
             EngineeringSheetLayout layout=engineeringSheetLayout;
-            SheetUiMetrics ui=sheetUiMetrics(layout.canvasWidth(),layout.canvasHeight(),materials.size());
-            int scaleBarH=ui.scaleBarHeight(),materialsH=ui.materialsHeight();
+            SheetUiMetrics ui=engineeringSheetUiMetrics;
+            if (ui==null) throw new IllegalStateException("Engineering sheet UI metrics not initialized");
+            int scaleBarH=ui.scaleBarHeight();
+            // V147 §20-22: 先用 view layout 的 canvasHeight 当 base,再用 buildMaterialsLayout 重新算 materialsHeight 并修正 canvasHeight。
+            // V147 §18: materialsHeight 必须来自 MaterialsLayout.panelHeight(),不再是固定 4 列估算。
+            MaterialsLayout ml=null;
+            int materialsPanelWidth=0;
+            int materialsH=ui.materialsHeight();
+            int finalCanvasHeight=layout.canvasHeight();
+            if (includeMaterials) {
+                java.awt.Font font=new java.awt.Font(java.awt.Font.SANS_SERIF,java.awt.Font.PLAIN,ui.materialsBodyFont());
+                BufferedImage probe=new BufferedImage(1,1,BufferedImage.TYPE_INT_ARGB);
+                java.awt.Graphics2D probeGraphics=probe.createGraphics();
+                probeGraphics.setFont(font);
+                java.awt.FontMetrics metrics=probeGraphics.getFontMetrics();
+                int widestName=1;
+                int widestQuantity=1;
+                for (MaterialEntry entry:materials) {
+                    widestName=Math.max(widestName,metrics.stringWidth(entry.name));
+                    widestQuantity=Math.max(widestQuantity,
+                            metrics.stringWidth(Long.toString(entry.count)));
+                }
+                int minimumColumnWidth=ui.iconSize()+scaled(10,ui.scale())+scaled(12,ui.scale())
+                        +widestName+widestQuantity+scaled(24,ui.scale());
+                // Keep a compact, balanced panel: roughly two rows per column, capped at four.
+                int probeColumns=Math.min(4,Math.max(1,
+                        (int)Math.ceil(Math.sqrt(materials.size()/2.0))));
+                int probePanelWidth=2*ui.panelPadding()+probeColumns*minimumColumnWidth
+                        +(probeColumns-1)*ui.columnGap();
+                ml=buildMaterialsLayout(materials,probePanelWidth,ui,metrics,probeColumns);
+                materialsPanelWidth=layout.canvasWidth()-2*margin;
+                ml=buildMaterialsLayout(materials,materialsPanelWidth,ui,metrics,probeColumns);
+                probeGraphics.dispose();
+                probe.flush();
+                materialsH=ml.panelHeight();
+                finalCanvasHeight=layout.drawingsBottom()+scaleBarH+materialsH+margin;
+            } else {
+                finalCanvasHeight=layout.drawingsBottom()+scaleBarH+margin;
+            }
+            // V147 §48: LOGGER 打印 SHEET_UI_SCALE。
             System.out.printf(Locale.ROOT,
-                    "SHEET_UI_SCALE canvas=%dx%d baseCanvas=%dx%d scale=%.4f%n",
-                    layout.canvasWidth(),layout.canvasHeight(),BASE_SHEET_WIDTH,BASE_SHEET_HEIGHT,ui.scale());
-            System.out.printf(Locale.ROOT,
-                    "MATERIALS_LAYOUT fontSize=%d iconSize=%d rowHeight=%d columnGap=%d panelHeight=%d%n",
-                    ui.materialsBodyFont(),ui.iconSize(),ui.rowHeight(),ui.columnGap(),ui.materialsHeight());
+                    "SHEET_UI_SCALE source=PRINCIPAL_CELL principalCell=%d basePrincipalCell=%d scale=%.4f canvas=%dx%d%n",
+                    cell,BASE_PRINCIPAL_CELL,ui.scale(),layout.canvasWidth(),finalCanvasHeight);
+            if (ml!=null)
+                System.out.printf(Locale.ROOT,
+                        "MATERIALS_LAYOUT fontSize=%d iconSize=%d rowHeight=%d columnGap=%d panelHeight=%d columns=%d%n",
+                        ml.fontSize(),ml.iconSize(),ml.rowHeight(),ml.columnGap(),ml.panelHeight(),ml.columns());
             PrincipalProjectionFrame[][] principalFrames=new PrincipalProjectionFrame[3][4];
             double sizeX=maxX-minX,sizeY=maxY-minY,sizeZ=maxZ-minZ;
             double maxPrincipalSpan=Math.max(sizeX,Math.max(sizeY,sizeZ));
             double principalScale=cell/Math.max(1.0,maxPrincipalSpan);
             int totalW=layout.canvasWidth();
-            int totalH=includeMaterials?layout.canvasHeight():layout.drawingsBottom()+scaleBarH+margin;
+            // V147: totalH 跟 ml.panelHeight() 同步。
+            int totalH=includeMaterials?finalCanvasHeight:layout.drawingsBottom()+scaleBarH+margin;
             BufferedImage canvas = new BufferedImage(totalW, totalH, BufferedImage.TYPE_INT_ARGB);
             java.awt.Graphics2D g = canvas.createGraphics();
             java.awt.Color sheetBackground = sheetBackground(outputStyle);
@@ -2123,8 +2456,11 @@ public final class OffscreenRenderer {
             g.drawString(blocks+" blocks",barX,barY-scaled(14,ui.scale()));
 
             int materialsY=drawingsBottom+scaleBarH;
-            if (includeMaterials)
-                drawMaterials(g,margin,materialsY,totalW-margin*2,materialsH,ui,outputStyle,primary);
+            if (includeMaterials) {
+                // V147: 传 ml 给 drawMaterials。
+                int materialsX=margin;
+                drawMaterials(g,materialsX,materialsY,materialsPanelWidth,materialsH,ml,ui,outputStyle,primary);
+            }
 
             g.setStroke(new java.awt.BasicStroke(ui.outerBorderStroke()));
             g.setColor(outputStyle == Style.BLUEPRINT ? java.awt.Color.WHITE : new java.awt.Color(78,72,64));
@@ -2133,8 +2469,10 @@ public final class OffscreenRenderer {
             Path file = out.resolve(outName);
             ImageIO.write(canvas, "PNG", file.toFile());
             System.out.println("WROTE COMPOSITE " + file + " (" + totalW + "x" + totalH + ")");
-            if (includeMaterials)
-                writeMaterialsDetail(canvas,margin,materialsY,totalW-margin*2,materialsH,outputStyle);
+            if (includeMaterials) {
+                int materialsX=margin;
+                writeMaterialsDetail(canvas,materialsX,materialsY,materialsPanelWidth,materialsH,outputStyle);
+            }
         }
 
         private void logPrincipalViewSizes(double sizeX,double sizeY,double sizeZ,double pixelsPerBlock) {
@@ -2251,6 +2589,7 @@ public final class OffscreenRenderer {
             if (!(height&&xSpan&&zSpan)) throw new IllegalStateException("Principal engineering alignment failed");
         }
 
+        // V146 §46-48: 重写 logger — 不再用 slot 字段,改用 union 10 placements + AXON_LAYOUT 格式。
         private static void logEngineeringSheetLayout(EngineeringSheetLayout layout) {
             System.out.printf("DRAWING_AREA top=%d bottom=%d centerY=%d%n",layout.drawingTop(),
                     layout.drawingBottom(),layout.drawingCenterY());
@@ -2261,99 +2600,109 @@ public final class OffscreenRenderer {
                     layout.principalMainRowY());
             System.out.printf(Locale.ROOT,"PRINCIPAL_LAYOUT gapX=%d gapY=%d scale=common%n",
                     layout.principalGapX(),layout.principalGapY());
-            SheetUiMetrics ui=sheetUiMetrics(layout.canvasWidth(),layout.canvasHeight(),0);
-            System.out.printf(Locale.ROOT,"SHEET_UI_SCALE canvas=%dx%d baseCanvas=%dx%d scale=%.4f%n",
-                    layout.canvasWidth(),layout.canvasHeight(),BASE_SHEET_WIDTH,BASE_SHEET_HEIGHT,ui.scale());
+            System.out.printf(Locale.ROOT,
+                    "AXON_UNIFORM_SCALE aspectMode=%s principalCell=%d globalScale=%.6f%n",
+                    layout.axonAspectMode(),layout.principalGapX()>0?Math.max(1,Math.max(layout.drawingArea().width(),layout.drawingArea().height())):540,
+                    layout.globalAxonScale());
+            System.out.printf(Locale.ROOT,
+                    "FINAL_LAYOUT_BOUNDS drawing=[%d,%d,%d,%d] principal=[%d,%d,%d,%d] canvas=%dx%d margin=%d%n",
+                    layout.drawingArea().x(),layout.drawingArea().y(),
+                    layout.drawingArea().width(),layout.drawingArea().height(),
+                    layout.principalReservedRect().x(),layout.principalReservedRect().y(),
+                    layout.principalReservedRect().width(),layout.principalReservedRect().height(),
+                    layout.canvasWidth(),layout.canvasHeight(),
+                    layout.drawingArea().x());
             for (View view:View.values()) if (isPrincipalView(view)) {
                 ViewPlacement p=layout.placement(view);
                 System.out.printf("PRINCIPAL_PLACEMENT view=%s x=%d y=%d width=%d height=%d%n",
                         view,p.x(),p.y(),p.width(),p.height());
             }
-            System.out.printf("PRINCIPAL_LAYOUT_SNAPSHOT phase=BEFORE_AXON hash=%d rect=%s%n",
-                    principalLayoutHash(layout),layout.principalReservedRect());
             System.out.println("AXON_LAYOUT_BEGIN");
-            for (Map.Entry<View,CornerSlot> entry:layout.axonSlotAssignments().entrySet()) {
-                ViewPlacement p=layout.placement(entry.getKey());
-                LayoutRect slot=layout.axonSlots().get(entry.getValue());
-                java.awt.Dimension source=layout.sourceSizes().get(entry.getKey());
-                String anchorColumn=entry.getValue()==CornerSlot.TOP_LEFT||entry.getValue()==CornerSlot.BOTTOM_LEFT
-                        ?"RIGHT":"BACK";
-                String anchorRow=entry.getValue()==CornerSlot.TOP_LEFT||entry.getValue()==CornerSlot.TOP_RIGHT
+            for (View av:View.values()) if (!isPrincipalView(av)) {
+                ViewPlacement p=layout.placement(av);
+                java.awt.Dimension source=layout.sourceSizes().get(av);
+                String anchorColumn=av==View.AXON_X_POS_Z_POS||av==View.AXON_X_POS_Z_NEG
+                        ?"displayRight":"back";
+                String anchorRow=av==View.AXON_X_POS_Z_POS||av==View.AXON_X_NEG_Z_POS
                         ?"TOP":"BOTTOM";
-                double fit=Math.min(p.width()/(double)Math.max(1,source.width),
-                        p.height()/(double)Math.max(1,source.height));
                 System.out.printf(Locale.ROOT,
-                        "AXON_LAYOUT view=%s anchorColumn=%s anchorRow=%s availableSize=%dx%d "
-                                +"sourceSize=%dx%d scale=%.6f finalRect=[%d,%d,%d,%d]%n",
-                        entry.getKey(),anchorColumn,anchorRow,slot.width(),slot.height(),
-                        source.width,source.height,fit,p.x(),p.y(),p.width(),p.height());
+                        "AXON_LAYOUT view=%s raw=%dx%d final=%dx%d globalScale=%.6f center=%d,%d anchorColumn=%s anchorRow=%s%n",
+                        av,source.width,source.height,p.width(),p.height(),
+                        layout.globalAxonScale(),p.centerX(),p.centerY(),anchorColumn,anchorRow);
             }
             System.out.println("AXON_LAYOUT_DONE");
         }
 
+        // V146 §49-58: 新 Validator — 10 条检查。
         private static void validateEngineeringSheetLayout(EngineeringSheetLayout layout) {
-            int principalHashBefore=principalLayoutHash(layout);
-            int groupCenter=(layout.principalGroupTop()+layout.principalGroupBottom())/2;
-            int centerDelta=Math.abs(groupCenter-layout.drawingCenterY());
-            System.out.printf("PRINCIPAL_GROUP_CENTER drawingCenterY=%d groupCenterY=%d delta=%d result=%s%n",
-                    layout.drawingCenterY(),groupCenter,centerDelta,centerDelta<=1?"PASS":"FAIL");
-            ViewPlacement left=layout.placement(View.LEFT_Z_NEG);
+            // §49: 必须正好 10 placements。
+            if (layout.placements().size()!=10)
+                throw new IllegalStateException("Expected 10 engineering placements, got "+layout.placements().size());
+            ViewPlacement displayRight=layout.placement(View.LEFT_Z_NEG);
             ViewPlacement front=layout.placement(View.FRONT_X_POS);
-            ViewPlacement right=layout.placement(View.RIGHT_Z_POS);
+            ViewPlacement displayLeft=layout.placement(View.RIGHT_Z_POS);
             ViewPlacement back=layout.placement(View.BACK_X_NEG);
-            int minTop=Math.min(Math.min(left.y(),front.y()),Math.min(right.y(),back.y()));
-            int maxTop=Math.max(Math.max(left.y(),front.y()),Math.max(right.y(),back.y()));
-            int minBottom=Math.min(Math.min(left.bottom(),front.bottom()),Math.min(right.bottom(),back.bottom()));
-            int maxBottom=Math.max(Math.max(left.bottom(),front.bottom()),Math.max(right.bottom(),back.bottom()));
-            int topDelta=maxTop-minTop,bottomDelta=maxBottom-minBottom;
+            ViewPlacement top=layout.placement(View.TOP_X_UP),bottom=layout.placement(View.BOTTOM_X_UP);
+            // §50: Main row 严格共顶/共底。
+            int topDelta=Math.max(Math.max(displayRight.y(),front.y()),
+                    Math.max(displayLeft.y(),back.y()))-Math.min(Math.min(displayRight.y(),front.y()),
+                    Math.min(displayLeft.y(),back.y()));
+            int bottomDelta=Math.max(Math.max(displayRight.bottom(),front.bottom()),
+                    Math.max(displayLeft.bottom(),back.bottom()))-Math.min(Math.min(displayRight.bottom(),front.bottom()),
+                    Math.min(displayLeft.bottom(),back.bottom()));
             System.out.printf("PRINCIPAL_MAIN_ROW_ALIGNMENT topDelta=%d bottomDelta=%d result=%s%n",
                     topDelta,bottomDelta,topDelta==0&&bottomDelta==0?"PASS":"FAIL");
-            ViewPlacement top=layout.placement(View.TOP_X_UP),bottom=layout.placement(View.BOTTOM_X_UP);
+            // §51: TOP/BOTTOM 与 FRONT 中心 X ±1px。
             int centerMax=Math.max(Math.abs(top.centerX()-front.centerX()),
                     Math.abs(bottom.centerX()-front.centerX()));
             System.out.printf("PRINCIPAL_X_CENTER_ALIGNMENT top=%d front=%d bottom=%d deltaMax=%d result=%s%n",
                     top.centerX(),front.centerX(),bottom.centerX(),centerMax,centerMax<=1?"PASS":"FAIL");
-            boolean dependencies=Math.abs(top.bottom()+layout.principalGapY()-front.y())<=1
-                    && Math.abs(front.bottom()+layout.principalGapY()-bottom.y())<=1;
-            boolean axonAnchors=true;
-            boolean collisions=false;
-            for (View axon:View.values()) if (!isPrincipalView(axon)) {
-                ViewPlacement axonPlacement=layout.placement(axon);
-                CornerSlot corner=layout.axonSlotAssignments().get(axon);
-                LayoutRect slot=layout.axonSlots().get(corner);
-                boolean insideSlot=slot.contains(axonPlacement);
-                boolean insideDrawing=layout.drawingArea().contains(axonPlacement);
-                ViewPlacement columnAnchor=(corner==CornerSlot.TOP_LEFT||corner==CornerSlot.BOTTOM_LEFT)
-                        ?right:back;
-                ViewPlacement rowAnchor=(corner==CornerSlot.TOP_LEFT||corner==CornerSlot.TOP_RIGHT)
-                        ?top:bottom;
-                boolean anchored=Math.abs(axonPlacement.centerX()-columnAnchor.centerX())<=1
-                        && Math.abs(axonPlacement.centerY()-rowAnchor.centerY())<=1;
-                System.out.printf("AXON_ANCHOR_CHECK view=%s center=%d,%d expected=%d,%d result=%s%n",
-                        axon,axonPlacement.centerX(),axonPlacement.centerY(),columnAnchor.centerX(),
-                        rowAnchor.centerY(),anchored?"PASS":"FAIL");
-                axonAnchors&=anchored;
-                System.out.printf("AXON_SLOT_CHECK view=%s slot=%s rect=[%d,%d,%d,%d] "
-                                +"slotRect=[%d,%d,%d,%d] inside=%s result=%s%n",
-                        axon,corner,axonPlacement.x(),axonPlacement.y(),axonPlacement.width(),axonPlacement.height(),
-                        slot.x(),slot.y(),slot.width(),slot.height(),insideSlot,insideSlot?"PASS":"FAIL");
-                System.out.printf("AXON_DRAWING_BOUNDS_CHECK view=%s insideDrawingArea=%s result=%s%n",
-                        axon,insideDrawing,insideDrawing?"PASS":"FAIL");
-                collisions|=!insideSlot || !insideDrawing;
+            // §52: Principal gap 正确 (TOP.bottom + gapY == FRONT.top 等)。
+            boolean topGap=Math.abs(top.bottom()+layout.principalGapY()-front.y())<=1;
+            boolean bottomGap=Math.abs(front.bottom()+layout.principalGapY()-bottom.y())<=1;
+            System.out.printf("PRINCIPAL_GAP_CHECK topGap=%s bottomGap=%s result=%s%n",
+                    topGap,bottomGap,topGap&&bottomGap?"PASS":"FAIL");
+            // §53: 四个 Axon anchor 不再依赖 CornerSlot。
+            ViewPlacement tl=layout.placement(View.AXON_X_POS_Z_POS);
+            ViewPlacement tr=layout.placement(View.AXON_X_NEG_Z_POS);
+            ViewPlacement bl=layout.placement(View.AXON_X_POS_Z_NEG);
+            ViewPlacement br=layout.placement(View.AXON_X_NEG_Z_NEG);
+            boolean tlAnchor=Math.abs(tl.centerX()-displayRight.centerX())<=1 && Math.abs(tl.centerY()-top.centerY())<=1;
+            boolean trAnchor=Math.abs(tr.centerX()-back.centerX())<=1 && Math.abs(tr.centerY()-top.centerY())<=1;
+            boolean blAnchor=Math.abs(bl.centerX()-displayRight.centerX())<=1 && Math.abs(bl.centerY()-bottom.centerY())<=1;
+            boolean brAnchor=Math.abs(br.centerX()-back.centerX())<=1 && Math.abs(br.centerY()-bottom.centerY())<=1;
+            System.out.printf("AXON_ANCHOR_CHECK TL=%s TR=%s BL=%s BR=%s result=%s%n",
+                    tlAnchor,trAnchor,blAnchor,brAnchor,
+                    tlAnchor&&trAnchor&&blAnchor&&brAnchor?"PASS":"FAIL");
+            // §54: 统一 Axon scale (rounding tolerance 0.5%)。
+            double minScale=Double.POSITIVE_INFINITY,maxScale=0.0;
+            View[] axons={View.AXON_X_POS_Z_POS,View.AXON_X_NEG_Z_POS,View.AXON_X_POS_Z_NEG,View.AXON_X_NEG_Z_NEG};
+            for (View view:axons) {
+                java.awt.Dimension raw=layout.sourceSizes().get(view);
+                ViewPlacement p=layout.placement(view);
+                double scale=Math.max(p.width(),p.height())/(double)Math.max(raw.width,raw.height);
+                minScale=Math.min(minScale,scale);
+                maxScale=Math.max(maxScale,scale);
+            }
+            boolean uniformScale=(maxScale-minScale)<=0.005;
+            System.out.printf("AXON_UNIFORM_SCALE_CHECK minScale=%.6f maxScale=%.6f result=%s%n",
+                    minScale,maxScale,uniformScale?"PASS":"FAIL");
+            // §55: 所有 Axon vs Principal collision = 0。
+            boolean axonVsPrincipal=true;
+            for (View axon:axons) {
+                ViewPlacement ap=layout.placement(axon);
                 for (View principal:View.values()) if (isPrincipalView(principal)) {
                     ViewPlacement p=layout.placement(principal);
-                    int width=Math.max(0,Math.min(axonPlacement.right(),p.right())
-                            -Math.max(axonPlacement.x(),p.x()));
-                    int height=Math.max(0,Math.min(axonPlacement.bottom(),p.bottom())
-                            -Math.max(axonPlacement.y(),p.y()));
+                    int width=Math.max(0,Math.min(ap.right(),p.right())-Math.max(ap.x(),p.x()));
+                    int height=Math.max(0,Math.min(ap.bottom(),p.bottom())-Math.max(ap.y(),p.y()));
                     int area=width*height;
                     System.out.printf("VIEW_COLLISION_CHECK axon=%s principal=%s intersectionArea=%d result=%s%n",
                             axon,principal,area,area==0?"PASS":"FAIL");
-                    collisions|=area!=0;
+                    axonVsPrincipal&=area==0;
                 }
             }
-            View[] axons={View.AXON_X_POS_Z_POS,View.AXON_X_NEG_Z_POS,
-                    View.AXON_X_POS_Z_NEG,View.AXON_X_NEG_Z_NEG};
+            // §56: 四个 Axon 互相也不得碰撞。
+            boolean axonVsAxon=true;
             for (int i=0;i<axons.length;i++) for (int j=i+1;j<axons.length;j++) {
                 ViewPlacement first=layout.placement(axons[i]),second=layout.placement(axons[j]);
                 int width=Math.max(0,Math.min(first.right(),second.right())-Math.max(first.x(),second.x()));
@@ -2361,15 +2710,35 @@ public final class OffscreenRenderer {
                 int area=width*height;
                 System.out.printf("AXON_COLLISION_CHECK first=%s second=%s intersectionArea=%d result=%s%n",
                         axons[i],axons[j],area,area==0?"PASS":"FAIL");
-                collisions|=area!=0;
+                axonVsAxon&=area==0;
             }
-            System.out.printf("PRINCIPAL_LAYOUT_SNAPSHOT phase=AFTER_AXON hash=%d rect=%s%n",
-                    principalLayoutHash(layout),layout.principalReservedRect());
-            System.out.printf("PRINCIPAL_LAYOUT_FROZEN result=%s%n",
-                    principalHashBefore==principalLayoutHash(layout)?"PASS":"FAIL");
-            if (centerDelta>1 || topDelta!=0 || bottomDelta!=0 || centerMax>1 || !dependencies || !axonAnchors)
-                throw new IllegalStateException("Shared engineering sheet layout validation failed");
-            if (collisions) throw new IllegalStateException("Axonometric view overlaps principal reserved area");
+            // §57: Drawing Area 必须包含全部 10 views。
+            boolean drawingContainsAll=true;
+            for (View view:View.values()) {
+                if (!layout.drawingArea().contains(layout.placement(view))) {
+                    System.out.printf("DRAWING_AREA_CONTAINS view=%s result=FAIL%n",view);
+                    drawingContainsAll=false;
+                }
+            }
+            System.out.printf("DRAWING_AREA_CONTAINS_ALL result=%s%n",drawingContainsAll?"PASS":"FAIL");
+            // §58: Drawing Area 就是真实 union(union should equal drawingArea)。
+            LayoutRect union=unionPlacements(layout.placements());
+            boolean unionMatches=union.x()==layout.drawingArea().x()
+                    &&union.y()==layout.drawingArea().y()
+                    &&union.width()==layout.drawingArea().width()
+                    &&union.height()==layout.drawingArea().height();
+            System.out.printf("DRAWING_AREA_UNION_MATCH result=%s%n",unionMatches?"PASS":"FAIL");
+            // 汇总。
+            if (!axonVsPrincipal) throw new IllegalStateException("Axonometric view overlaps principal reserved area");
+            if (!axonVsAxon) throw new IllegalStateException("Axonometric views collide with each other");
+            if (!drawingContainsAll) throw new IllegalStateException("DrawingArea does not contain all 10 views");
+            if (!unionMatches) throw new IllegalStateException("DrawingArea != union of 10 placements");
+            if (topDelta!=0||bottomDelta!=0||centerMax>1||!topGap||!bottomGap)
+                throw new IllegalStateException("Principal alignment failed");
+            if (!tlAnchor||!trAnchor||!blAnchor||!brAnchor)
+                throw new IllegalStateException("Axon anchor check failed");
+            if (!uniformScale)
+                throw new IllegalStateException("Axon uniform scale check failed");
         }
 
         private static int principalLayoutHash(EngineeringSheetLayout layout) {
@@ -2474,6 +2843,58 @@ public final class OffscreenRenderer {
             System.out.println("WROTE MATERIAL DETAIL " + file + " (" + width*2 + "x" + height*2 + ")");
         }
 
+        private void writeMaterialsOnly() throws Exception {
+            SheetUiMetrics ui=engineeringSheetUiMetrics;
+            if (ui==null) throw new IllegalStateException("Engineering sheet UI metrics not initialized");
+            java.awt.Font font=new java.awt.Font(java.awt.Font.SANS_SERIF,
+                    java.awt.Font.PLAIN,ui.materialsBodyFont());
+            BufferedImage probe=new BufferedImage(1,1,BufferedImage.TYPE_INT_ARGB);
+            java.awt.Graphics2D probeGraphics=probe.createGraphics();
+            probeGraphics.setFont(font);
+            java.awt.FontMetrics metrics=probeGraphics.getFontMetrics();
+            int widestName=1;
+            int widestQuantity=1;
+            for (MaterialEntry entry:materials) {
+                widestName=Math.max(widestName,metrics.stringWidth(entry.name));
+                widestQuantity=Math.max(widestQuantity,
+                        metrics.stringWidth(Long.toString(entry.count)));
+            }
+            int minimumColumnWidth=ui.iconSize()+scaled(10,ui.scale())+scaled(12,ui.scale())
+                    +widestName+widestQuantity+scaled(24,ui.scale());
+            int probeColumns=Math.min(4,Math.max(1,materials.size()));
+            int probePanelWidth=2*ui.panelPadding()+probeColumns*minimumColumnWidth
+                    +(probeColumns-1)*ui.columnGap();
+            MaterialsLayout ml=buildMaterialsLayout(materials,probePanelWidth,ui,metrics);
+            int actualColumns=ml.columns();
+            int panelWidth=2*ui.panelPadding()+actualColumns*minimumColumnWidth
+                    +(actualColumns-1)*ui.columnGap();
+            ml=buildMaterialsLayout(materials,panelWidth,ui,metrics);
+            probeGraphics.dispose();
+            probe.flush();
+
+            // V153: materials_only is a standalone export, so render its existing logical
+            // layout at 2x. This keeps buildMaterialsLayout as the single layout source while
+            // doubling the output resolution, text, icons, and other panel details.
+            int standaloneScale=2;
+            int outputWidth=panelWidth*standaloneScale;
+            int outputHeight=ml.panelHeight()*standaloneScale;
+            BufferedImage canvas=new BufferedImage(outputWidth,outputHeight,
+                    BufferedImage.TYPE_INT_ARGB);
+            java.awt.Graphics2D g=canvas.createGraphics();
+            g.scale(standaloneScale,standaloneScale);
+            g.setColor(sheetBackground(Style.PAPER));
+            g.fillRect(0,0,panelWidth,ml.panelHeight());
+            drawEngineeringGrid(g,panelWidth,ml.panelHeight(),Style.PAPER);
+            drawMaterials(g,0,0,panelWidth,ml.panelHeight(),ml,ui,Style.PAPER,
+                    java.awt.Color.BLACK);
+            g.dispose();
+            Path file=out.resolve(outputBaseName()+"_materials_only.png");
+            ImageIO.write(canvas,"PNG",file.toFile());
+            canvas.flush();
+            System.out.println("WROTE MATERIALS ONLY "+file+" ("+outputWidth+"x"
+                    +outputHeight+", columns="+ml.columns()+")");
+        }
+
         private static void drawEngineeringGrid(java.awt.Graphics2D g, int width, int height, Style style) {
             int size = nonNegativeIntProperty("litematic.sheet.grid.size", 64);
             if (size == 0) return;
@@ -2537,41 +2958,45 @@ public final class OffscreenRenderer {
             return MaterialWorkbookWriter.safeName(sheetTitle());
         }
 
+        // V147 §33-37: drawMaterials 完全使用 MaterialsLayout 提供的位置/列数,不再自己算 rows/columns/columnW。
         private void drawMaterials(java.awt.Graphics2D g, int x, int y, int width, int height,
-                                   SheetUiMetrics ui, Style style, java.awt.Color textColor) {
-            double scale=ui.scale();
-            int heading=ui.materialsTitleFont(),rowH=ui.rowHeight();
-            int panelPad=ui.panelPadding(),iconSize=ui.iconSize();
-            int iconPlatePad=Math.max(2,(int)Math.round(2*scale));
+                                   MaterialsLayout ml, SheetUiMetrics ui, Style style, java.awt.Color textColor) {
+            int scale=(int)Math.round(ui.scale()*100);
+            int heading=ui.materialsTitleFont(),rowH=ml.rowHeight();
+            int panelPad=ml.padding();
+            int iconSize=ml.iconSize();
+            int iconPlatePad=Math.max(2,(int)Math.round(2*ui.scale()));
             int iconPlateSize=iconSize+iconPlatePad*2;
-            int columnGap=ui.columnGap();
-            int columnW=(width-panelPad*2-columnGap*3)/4;
+            int columns=ml.columns(),rows=ml.rows();
+            int[] columnWidths=ml.columnWidths();
+            int[] columnX=ml.columnX();
             g.setColor(style == Style.BLUEPRINT ? new java.awt.Color(10,35,75,190)
                     : new java.awt.Color(238,232,216,235));
-            g.fillRoundRect(x,y,width,height,(int)Math.round(10*scale),(int)Math.round(10*scale));
+            g.fillRoundRect(x,y,width,height,(int)Math.round(10*ui.scale()),(int)Math.round(10*ui.scale()));
             g.setColor(style == Style.BLUEPRINT ? new java.awt.Color(255,255,255,210)
                     : new java.awt.Color(145,137,123));
             g.setStroke(new java.awt.BasicStroke(ui.panelBorderStroke()));
-            g.drawRoundRect(x,y,width-1,height-1,(int)Math.round(10*scale),(int)Math.round(10*scale));
+            g.drawRoundRect(x,y,width-1,height-1,(int)Math.round(10*ui.scale()),(int)Math.round(10*ui.scale()));
             g.setColor(textColor);
             g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF,java.awt.Font.BOLD,heading));
             g.drawString("Materials",x+panelPad,y+panelPad+heading);
-            int rows=Math.max(1,(materials.size()+3)/4);
-            g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF,java.awt.Font.PLAIN,ui.materialsBodyFont()));
+            g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF,java.awt.Font.PLAIN,ml.fontSize()));
+            int iconTextGap=(int)Math.round(7*ui.scale());
+            int quantityGap=(int)Math.round(5*ui.scale());
             for (int i=0;i<materials.size();i++) {
                 int column=i/rows, row=i%rows;
-                int cellX=x+panelPad+column*(columnW+columnGap);
-                int cellY=y+panelPad+(int)Math.round(32*scale)+row*rowH;
+                int cellX=x+columnX[column];
+                int cellY=y+panelPad+ml.titleGap()+row*rowH;
                 MaterialEntry entry=materials.get(i);
                 g.setColor(style == Style.BLUEPRINT ? new java.awt.Color(218,235,250,238)
                         : new java.awt.Color(248,245,235,242));
                 g.fillRoundRect(cellX,cellY,iconPlateSize,iconPlateSize,
-                        (int)Math.round(5*scale),(int)Math.round(5*scale));
+                        (int)Math.round(5*ui.scale()),(int)Math.round(5*ui.scale()));
                 g.setColor(style == Style.BLUEPRINT ? new java.awt.Color(255,255,255,225)
                         : new java.awt.Color(174,167,153,220));
-                g.setStroke(new java.awt.BasicStroke((float)Math.max(1.0,scale)));
+                g.setStroke(new java.awt.BasicStroke((float)Math.max(1.0,ui.scale())));
                 g.drawRoundRect(cellX,cellY,iconPlateSize-1,iconPlateSize-1,
-                        (int)Math.round(5*scale),(int)Math.round(5*scale));
+                        (int)Math.round(5*ui.scale()),(int)Math.round(5*ui.scale()));
                 if (entry.icon != null) {
                     Object oldInterpolation=g.getRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION);
                     g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
@@ -2580,14 +3005,15 @@ public final class OffscreenRenderer {
                     if (oldInterpolation != null)
                         g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,oldInterpolation);
                 }
-                int textX=cellX+iconPlateSize+(int)Math.round(7*scale);
-                int baseline=cellY+(int)Math.round(24*scale);
+                int textX=cellX+iconPlateSize+iconTextGap;
+                int baseline=cellY+(int)Math.round(24*ui.scale());
                 String quantity=Long.toString(entry.count);
                 java.awt.FontMetrics fm=g.getFontMetrics();
-                int quantityGap=(int)Math.round(5*scale);
-                int available=Math.max(10,columnW-(textX-cellX)-fm.stringWidth(quantity)-quantityGap);
-                String name=fitText(entry.name,fm,available);
-                int quantityX=textX+fm.stringWidth(name)+quantityGap;
+                // V147 §37: 数量右对齐本列。
+                int columnRight=cellX+columnWidths[column];
+                int quantityX=columnRight-fm.stringWidth(quantity);
+                int nameAvailable=textX<=quantityX-quantityGap?quantityX-quantityGap-textX:Math.max(10,columnWidths[column]-(textX-cellX)-fm.stringWidth(quantity)-quantityGap);
+                String name=fitText(entry.name,fm,nameAvailable);
                 g.setColor(textColor);
                 g.drawString(name,textX,baseline);
                 g.drawString(quantity,quantityX,baseline);
@@ -3020,7 +3446,8 @@ public final class OffscreenRenderer {
         @Override public boolean isPauseScreen() { return false; }
     }
 
-    private static final class MaterialEntry {
+    // V147: 改 package-private (去掉 private),让同包测试可以 forTest factory 访问。
+    static final class MaterialEntry {
         final ItemStack stack;
         final String name;
         final long count;
@@ -3030,6 +3457,10 @@ public final class OffscreenRenderer {
         }
         String name() { return name; }
         long count() { return count; }
+        // V147 §47-55 测试用 factory —— 保持 MaterialEntry 内部数据不变,只是给同包测试一个 entry 点。
+        static MaterialEntry forTest(String name,long count) {
+            return new MaterialEntry(null,name,count);
+        }
     }
 
     private record FrozenEntity(Entity entity, Vec3 position) {}

@@ -430,6 +430,58 @@ def _cleanup_render_world(world_name, retries=5, retry_delay=0.5):
             time.sleep(retry_delay)
 
 
+# V150 §54: 安全 orphan sweep —— 只扫描 poc/run/saves/LitematicRender_*,
+# 不允许碰其它世界,也不在活跃渲染期间跑。
+def sweep_orphan_render_worlds(dry_run=False, allowed=None):
+    """列出/删除所有当前没有对应活跃任务的 LitematicRender_* 临时世界。
+
+    V150 §54 安全约束:
+    - 只扫描 `poc/run/saves/LitematicRender_*` (POC_ROOT / "run" / "saves")
+    - 不允许碰任何非 LitematicRender_ 前缀的目录(防止误删)
+    - 默认 dry_run=True;只在 `dry_run=False` 且没有活跃 render 时真删
+    - `allowed` 是活跃任务正在使用的世界名集合(白名单),这些不会被删
+    """
+    if allowed is None:
+        allowed = set()
+    saves_dir = POC_ROOT / "run" / "saves"
+    if not saves_dir.is_dir():
+        return {"scanned": 0, "deleted": 0, "skipped": 0, "items": []}
+    targets = []
+    for entry in sorted(saves_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        if not entry.name.startswith(RENDER_WORLD_PREFIX):
+            continue  # 安全:不碰非 LitematicRender_ 世界
+        if entry.name in allowed:
+            continue  # 活跃任务正在用,跳过
+        targets.append(entry)
+    result = {"scanned": len(targets), "deleted": 0, "skipped": 0, "items": []}
+    for world_dir in targets:
+        result["items"].append(world_dir.name)
+        if dry_run:
+            result["skipped"] += 1
+            continue
+        if _cleanup_render_world(world_dir.name):
+            result["deleted"] += 1
+        else:
+            result["skipped"] += 1
+    _log_status(logging.INFO,
+                "orphan render world sweep scanned=%d deleted=%d skipped=%d dry_run=%s",
+                result["scanned"], result["deleted"], result["skipped"], dry_run)
+    return result
+
+
+# V150 §54: 列出当前所有 LitematicRender_* 临时世界(只读,用于诊断)
+def list_orphan_render_worlds():
+    saves_dir = POC_ROOT / "run" / "saves"
+    if not saves_dir.is_dir():
+        return []
+    return sorted(
+        entry.name for entry in saves_dir.iterdir()
+        if entry.is_dir() and entry.name.startswith(RENDER_WORLD_PREFIX)
+    )
+
+
 def _test_metadata():
     """Smoke-test all reported schematics, including the former EOF case."""
     samples = (
@@ -521,6 +573,8 @@ def _run(task_id):
             "blueprint_no_materials": f"{output_prefix}_overview_no_materials.png" if (output / f"{output_prefix}_overview_no_materials.png").is_file() else None,
             "thumbnail": "mcoo_axon_x_pos_z_pos_paper.png" if (output / "mcoo_axon_x_pos_z_pos_paper.png").is_file() else None,
             "workbook": workbook.name if workbook else None,
+            # V151: codex writeMaterialsOnly 输出的独立材料列表 PNG。
+            "materials_image": f"{output_prefix}_materials_only.png" if (output / f"{output_prefix}_materials_only.png").is_file() else None,
             "log": log_file.name,
         }
         returncode = result if isinstance(result, int) else getattr(result, "returncode", -1)
@@ -750,6 +804,34 @@ def download_source(task_id):
     return send_file(task["source_path"], as_attachment=True, download_name=task["filename"])
 
 
+# V150 §54: 列出当前所有 LitematicRender_* 临时世界(只读诊断)。
+@bp.get("/api/tools/litematic_render/orphan_worlds")
+def list_orphan_worlds():
+    items = list_orphan_render_worlds()
+    return jsonify({"items": items, "count": len(items)})
+
+
+# V150 §54: 安全 orphan sweep —— 默认 dry_run,需要 confirm=true 才真删。
+# V150 §55 安全前置:服务端再校验一次"没有 active render"。
+@bp.post("/api/tools/litematic_render/sweep_orphan_worlds")
+def sweep_orphan_worlds():
+    payload = request.get_json(silent=True) or {}
+    confirm = bool(payload.get("confirm", False))
+    # 拒绝在有 active render 时执行真删。
+    if confirm:
+        tasks = _read_tasks()
+        active = [t for t in tasks if t.get("status") in ("rendering", "queued")]
+        if active:
+            return jsonify({
+                "ok": False,
+                "error": "active renders exist",
+                "active_count": len(active),
+            }), 409
+    result = sweep_orphan_render_worlds(dry_run=not confirm)
+    result["dry_run"] = not confirm
+    return jsonify(result)
+
+
 @bp.get("/tools/litematic_render/<task_id>/download/zip")
 def download_zip(task_id):
     task = _task(task_id)
@@ -767,6 +849,7 @@ def download_output(task_id, kind):
     if not task or kind not in {
         "paper", "paper_no_materials", "blueprint", "blueprint_no_materials",
         "thumbnail", "workbook", "log",
+        "materials_image",  # V151: 独立材料列表 PNG (codex writeMaterialsOnly 输出)
     }:
         abort(404)
     filename = task.get("outputs", {}).get(kind)
@@ -777,7 +860,10 @@ def download_output(task_id, kind):
     path = (Path(task["output_dir"]) / filename).resolve()
     if path.parent != Path(task["output_dir"]).resolve() or not path.is_file():
         abort(404)
-    inline = kind in {"paper", "paper_no_materials", "blueprint", "blueprint_no_materials", "thumbnail"}
+    inline = kind in {
+        "paper", "paper_no_materials", "blueprint", "blueprint_no_materials",
+        "thumbnail", "materials_image",
+    } or request.args.get("inline") == "1"  # V151b: 显式 inline=1 也走浏览器内预览
     return send_file(path, as_attachment=not inline, download_name=path.name)
 
 
