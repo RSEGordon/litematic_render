@@ -1,48 +1,59 @@
-# litematic_render — MC Schematic 三视图 + 模型渲染器
+# Litematic Render
 
-把 Minecraft 的 `.litematic` 文件渲染成 PNG 三视图（俯视/正视/侧视）+ 可选 3D 图。
+Minecraft schematic (.litematic) 6-view axonometric renderer for documentation
+and engineering sheets. Renders any litematic file from a local Minecraft Java
+client into a 6-axis composite diagram plus a standalone materials-only list.
 
-## 文件
+## What it does
 
-| 文件 | 功能 |
-|---|---|
-| `f_render_ascii.py` | 方案 F：ASCII 三视图（最简单，调试用） |
-| `a_render_texture.py` | 方案 A：matplotlib 渲染贴图三视图（基础版） |
-| `a_render_v3.py` | 方案 A v3：解析 blockstate JSON + model JSON（含 parent 递归），按 facing 选面贴图，X 射线半透明 |
+Given a `.litematic` file, the tool produces:
 
-## 用法
+- A composite PNG showing 6 orthographic-style views (top + 5 sides)
+  anchored from the principal corners of the schematic's bounding box.
+- An engineering sheet with axonometric views + materials table side-by-side,
+  centered on the workbook. Owner (the originating author of the litematic)
+  gets a separate sheet.
+- A standalone `materials_only.png` listing every block type, count, and
+  percentage in a justified 2-column layout.
+- An XLSX materials workbook with the same data table-form.
 
-```bash
-# 装依赖
-pip install litemapy matplotlib Pillow
+## Architecture
 
-# 提取 MC 客户端资源（1.21.1 兼容 26.x 大部分方块）
-unzip -o -q /path/to/minecraft-client.jar \
-    'assets/minecraft/textures/block/*' \
-    'assets/minecraft/models/block/*' \
-    'assets/minecraft/blockstates/*' \
-    -d client_assets/
-
-# 跑 v3
-python3 a_render_v3.py path/to/file.litematic out.png 16 3
-# 参数: input output.png px-per-block xray-layers
+```
+litematic_render/
+├── poc/
+│   ├── src/main/java/com/rsegordon/poc/   # OffscreenRenderer + MaterialWorkbookWriter
+│   ├── src/test/java/                     # JUnit tests for engineering / materials layout
+│   └── tools/litematic_render_ui/         # Combined-app five-page Flask UI
+├── tests/                                 # regression test litematics
+└── combined_app5.py / FileShare/工具/combined/  # runtime hosting
 ```
 
-## 当前限制（要修的）
+The renderer (`OffscreenRenderer.java`) runs a vanilla Minecraft client in
+`Superflat the_void` mode, loads the litematic into an isolated world,
+captures a 6-axis axonometric set, and composites them onto a single canvas.
+The materials table is extracted from a single walk over the world and
+displayed in justified-fill columns.
 
-1. **方块形状** = 当 1×1×1 立方体画
-   - 铁轨/红石线/红石火把实际是 1/16 高的薄片贴地
-   - 中继器/比较器实际是 2/16 高的矮立方体
-   - 漏斗模型由多个 element 组成（主体 + 4 个漏斗嘴）
-2. **红石线** = 点状 `redstone_dust_dot`
-   - 实际应按 power + 4 个方向 neighbors 拼 line0/line1/side0/side1/up/cross
-3. **X 射线半透明**代码已写但效果不明显
-4. **紫黑格 fallback** 太多
+## Run
 
-## 修法（计划）
+```bash
+cd poc
+./gradlew compileJava
+cd tools/litematic_render_ui
+python3 app.py    # listens on :19995 by default
+```
 
-- 解析 `assets/minecraft/models/block/*.json` 的 `from/to` + `elements[].faces`
-- 递归 parent 链
-- 真实按方块在 y 方向的 from/to 范围画
-- 按 facing 选面贴图 + 处理 y/x rotation
-- X 射线半透明叠加
+Upload a `.litematic` via the Flask UI; the tool records a task, renders it
+through `OffscreenRenderer`, and produces a detail page with the 6-view
+composite + materials card (XLSX + PNG download buttons).
+
+## Build status
+
+Active development. The 6-view composite, materials list, and the XLSX
+workbook are stable. The renderer runs in a real vanilla Minecraft 1.21.1
+client to guarantee pixel-level accuracy against in-game blockstates.
+
+## License
+
+Personal project. All rights reserved unless explicitly transferred.
