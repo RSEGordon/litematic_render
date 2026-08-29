@@ -78,3 +78,6 @@ poc/logs/
 # V4x 早期调研 ad-hoc md（不入仓，老板的笔记本）
 V4[6-9]_*.md
 V5[0-3]_*.md
+
+# README 配图例外（不在通用 *.png 屏蔽范围内）
+!docs/preview-*.png
