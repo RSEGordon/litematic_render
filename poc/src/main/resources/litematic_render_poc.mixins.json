@@ -1,6 +1,6 @@
 {
   "required": true,
-  "package": "com.rsegordon.poc.mixin",
+  "package": "io.github.rsegordon.litematic_render.mixin",
   "compatibilityLevel": "JAVA_25",
   "client": [
     "BlockModelLighterMixin",

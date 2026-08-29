@@ -22,10 +22,20 @@ from xml.etree import ElementTree as ET
 import nbtlib
 from flask import Blueprint, abort, jsonify, redirect, render_template, request, send_file, url_for
 POC_ROOT = Path(__file__).resolve().parents[2]
-LITEMATIC_DIR = Path("/home/rsegordon/桌面/OpenClawFile/FileShare/工具/combined/litematic")
+# Storage root for uploaded litematics and per-task artifacts.
+# Override with LITEMATIC_RENDER_DIR; default is `~/litematic_render_tasks/`.
+# (Was: a hardcoded "/home/<user>/桌面/..." path — see LOCALIZE.md A-2.)
+LITEMATIC_DIR = Path(
+    os.environ.get(
+        "LITEMATIC_RENDER_DIR",
+        str(Path.home() / "litematic_render_tasks"),
+    )
+)
 RAW_DIR = LITEMATIC_DIR / "raw"
 TASKS_FILE = LITEMATIC_DIR / "tasks.json"
-JAVA_HOME = Path(os.environ.get("LITEMATIC_RENDER_JAVA_HOME", "/opt/java/jdk-25.0.1"))
+# JDK location for the rendering client. Set LITEMATIC_RENDER_JAVA_HOME on
+# the deploy host; we keep no machine-specific default here.
+JAVA_HOME = Path(os.environ["LITEMATIC_RENDER_JAVA_HOME"])
 _lock = threading.RLock()
 _render_lock = threading.Lock()
 _task_processes = {}  # V129: task_id -> (python_thread, java_popen) for kill-on-delete
@@ -38,16 +48,19 @@ UPDATE_RETRIES = 3
 UPDATE_RETRY_DELAY = 0.5
 RENDER_WORLD_PREFIX = "LitematicRender_"
 
+# Mapping vanilla-MC English log lines to localized UI strings.
+# Currently Chinese-only — see LOCALIZE.md A-3 (consider i18n before
+# opening up to an English-speaking audience).
 LOG_TRANSLATIONS = {
-    "WROTE COMPOSITE": "已生成合成图", "WROTE MATERIAL WORKBOOK": "已生成材料清单",
-    "WROTE OUTPUT ARCHIVE": "已打包输出", "WROTE": "已写出",
-    "LITEMATIC_RENDER_DONE": "渲染完成", "BUILD SUCCESSFUL": "构建成功",
-    "BUILD FAILED": "构建失败", "Stopping server": "停止服务",
-    "Saving players": "保存玩家数据", "Saving chunks": "保存区块",
-    "Saving worlds": "保存世界", "Saving dimensions": "保存维度",
-    "RenderBot lost connection": "渲染机器人断开连接", "Loading mods": "加载模组",
-    "loaded litematic": "已读取投影", "rendering overview": "生成概览图",
-    "rendering paper": "生成彩图", "Starting Minecraft": "启动 Minecraft",
+    "WROTE COMPOSITE": "Composite generated", "WROTE MATERIAL WORKBOOK": "Materials workbook generated",
+    "WROTE OUTPUT ARCHIVE": "Output archive written", "WROTE": "Wrote",
+    "LITEMATIC_RENDER_DONE": "Render complete", "BUILD SUCCESSFUL": "Build successful",
+    "BUILD FAILED": "Build failed", "Stopping server": "Stopping server",
+    "Saving players": "Saving players", "Saving chunks": "Saving chunks",
+    "Saving worlds": "Saving worlds", "Saving dimensions": "Saving dimensions",
+    "RenderBot lost connection": "Render bot lost connection", "Loading mods": "Loading mods",
+    "loaded litematic": "loaded litematic", "rendering overview": "rendering overview",
+    "rendering paper": "rendering paper", "Starting Minecraft": "Starting Minecraft",
     "Litematica loaded": "Litematica 模组已加载", "Applying mixin": "应用 mixin",
     "Initializing": "初始化中", "TOTAL_BLOCKS": "总方块数", "REGION": "区域",
     "STEP": "步骤", "elapsed": "已用时", "rendering": "渲染中",

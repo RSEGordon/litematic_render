@@ -4,7 +4,7 @@ plugins {
 }
 
 version = '0.1.0-poc'
-group = 'com.rsegordon'
+group = 'io.github.rsegordon.litematic_render'
 
 repositories {
     maven { url = 'https://maven.fabricmc.net/' }

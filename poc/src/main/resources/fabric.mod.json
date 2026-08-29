@@ -4,7 +4,7 @@
   "version": "${version}",
   "name": "Litematic Render PoC",
   "environment": "client",
-  "entrypoints": { "client": ["com.rsegordon.poc.LitematicRenderMod"] },
+  "entrypoints": { "client": ["io.github.rsegordon.litematic_render.LitematicRenderMod"] },
   "mixins": ["litematic_render_poc.mixins.json"],
   "depends": {
     "fabricloader": ">=0.19.3",
