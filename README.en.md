@@ -205,9 +205,10 @@ The V1 ASCII/texture/Three.js prototypes are kept around for traceability — th
 
 ## 📝 License
 
-Personal project. The render client (`poc/src/main/java/`) is the author's own code. The materials workbook template XLSX bundled in `src/test/resources/` is the author's own — third-party owners of their own Minecraft schematics should provide their own template.
+[MIT License](./LICENSE). Original code under `poc/src/main/java/` is open-source under MIT. Explicit reservations:
 
-No explicit open-source license is granted. By default, "all rights reserved" applies (since no LICENSE file is shipped). The author may add a license in a future commit.
+- The Minecraft blockstate / model JSON files under `client_assets/` are derived from Mojang's vanilla Minecraft client and remain under Mojang's proprietary terms — they are **not** relicensed by this repository.
+- The `owner_workbook_template.xlsx` fixture under `src/test/resources/` is the author's own owner-workbook schema. Reusers rendering their own litematics against this project should substitute their own XLSX.
 
 ---
 

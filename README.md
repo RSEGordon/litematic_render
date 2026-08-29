@@ -207,9 +207,10 @@ V1 的 ASCII / texture / Three.js 原型代码保留,便于追溯项目起点和
 
 ## 📝 许可证
 
-个人项目。`poc/src/main/java/` 下的渲染客户端是作者自己写的;materials workbook 模板 XLSX (`src/test/resources/`) 也是作者的——使用本项目的 Minecraft 投影如需材料清单,应替换成自己 schema 的 template XLSX。
+[MIT License](./LICENSE)。`poc/src/main/java/` 下作者原创代码按 MIT 公开。说明性限制:
 
-当前未发布 LICENSE 文件,默认按"保留所有权利"处理。后续可能添加 license。
+- `client_assets/` 内的 Minecraft blockstate / 模型 JSON 来自 Mojang 的 vanilla client,**这一部分受 Mojang proprietary 约束,不归本仓库 license 管**。
+- `src/test/resources/owner_workbook_template.xlsx` 是作者自己设计的 owner workbook schema。如需重用本仓库渲染管线 + 自己的 schema,使用者应替换成自己的 XLSX。
 
 ---
 
